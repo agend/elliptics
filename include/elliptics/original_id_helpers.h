@@ -9,28 +9,25 @@
 extern "C" {
 #endif
 
-static inline void copy_identifiers_cmd (uint8_t *src_key, uint8_t* original_id)
+const int ORIGINAL_ID_SIZE = sizeof (int64_t);
+const int ORIGINAL_ID_OFFSET_IN_ID = EBLOB_ID_SIZE - sizeof (int64_t);
+
+static inline void copy_to_eblob_id (uint8_t *eblob_id, uint8_t *dnet_id)
 {
-    memset((void*)src_key, 0, EBLOB_ID_SIZE);
-    int id_size = sizeof (uint64_t);
-    int i, j;
-    for (i = 0, j = EBLOB_ID_SIZE - 1; i < id_size; i++, j--)
-    {
-        src_key [i] = original_id [j];
-    }
+	memset((void*)eblob_id, 0, EBLOB_ID_SIZE);
+	int i = 0;
+	for (i = 0; i < ORIGINAL_ID_SIZE; i++)
+	{
+		eblob_id [i] = dnet_id [ORIGINAL_ID_OFFSET_IN_ID + i];
+	}
 }
 
-static inline void reverse_copy_identifiers_cmd (uint8_t *dst_key, uint8_t *src_key)
+static inline void copy_to_dnet_id (uint8_t *dnet_id, uint8_t *eblob_id)
 {
-    int id_size = sizeof (int64_t);
-    int i, j;
-    for (i = 0, j = EBLOB_ID_SIZE - 1; i < id_size; i++, j--)
-    {
-        dst_key [j] = src_key [i];
-    }
-}
+	dnet_digest_transform_raw(eblob_id + ORIGINAL_ID_OFFSET_IN_ID, ORIGINAL_ID_SIZE, dnet_id, EBLOB_ID_SIZE);
 
-int dnet_crypto_direct (const void *src, uint64_t size, void *dst, unsigned int *dsize);
+	memcpy(dnet_id, eblob_id + ORIGINAL_ID_OFFSET_IN_ID, ORIGINAL_ID_SIZE);
+}
 
 #ifdef __cplusplus
 }
