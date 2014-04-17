@@ -565,6 +565,13 @@ class session
 		async_remove_result remove(const key &id);
 
 		/*!
+		 * Removes all the entries of key \a original_id at server nodes.
+		 *
+		 * Returns async_remove_result.
+		 */
+		async_remove_result remove_by_original_id(const uint64_t &original_id);
+
+		/*!
 		 * Queries statistics information from the server nodes.
 		 *
 		 * Returns async_stat_result.

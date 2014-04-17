@@ -193,9 +193,9 @@ static int blob_write(struct eblob_backend_config *c, void *state,
 	if (io->flags & DNET_IO_FLAGS_NOCSUM)
 		flags |= BLOB_DISK_CTL_NOCSUM;
 
-		// We are replacing straightforward copying for zeroing down the first bytes
-		// memcpy(key.id, io->id, EBLOB_ID_SIZE);
-		copy_to_eblob_id (key.id, io->id);
+	// We are replacing straightforward copying for zeroing down the first bytes
+	// memcpy(key.id, io->id, EBLOB_ID_SIZE);
+	copy_to_eblob_id (key.id, io->id);
 
 	if (io->flags & DNET_IO_FLAGS_PREPARE) {
 		err = eblob_write_prepare(b, &key, io->num + ehdr_size, flags);
@@ -303,9 +303,9 @@ static int blob_read(struct eblob_backend_config *c, void *state, struct dnet_cm
 	dnet_ext_list_init(&elist);
 	dnet_convert_io_attr(io);
 
-		// We are replacing straightforward copying for zeroing down the first bytes
-		// memcpy(key.id, io->id, EBLOB_ID_SIZE);
-		copy_to_eblob_id (key.id, io->id);
+	// We are replacing straightforward copying for zeroing down the first bytes
+	// memcpy(key.id, io->id, EBLOB_ID_SIZE);
+	copy_to_eblob_id (key.id, io->id);
 
 	if (io->flags & DNET_IO_FLAGS_NOCSUM)
 		csum = EBLOB_READ_NOCSUM;
