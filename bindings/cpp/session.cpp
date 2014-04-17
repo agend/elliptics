@@ -685,6 +685,41 @@ async_read_result session::read_data(const key &id, uint64_t offset, uint64_t si
 	return read_data(id, std::move(groups), offset, size);
 }
 
+
+async_read_result session::read_data_by_original_id(const uint64_t &original_id)
+{
+	dnet_id raw;
+	transform(raw, original_id);
+
+	key id(raw);
+
+	async_read_result result(*this);
+	dnet_io_control control;
+	memset(&control, 0, sizeof(control));
+
+	control.fd = -1;
+	control.cmd = DNET_CMD_READ;
+	control.cflags = DNET_FLAGS_NEED_ACK | get_cflags();
+
+	dnet_io_attr io;
+	memset(&io, 0, sizeof(io));
+
+	io.size   = 0;
+	io.offset = 0;
+	io.flags  = get_ioflags();
+
+	memcpy(&control.io, &io, sizeof(dnet_io_attr));
+
+	auto cb = createCallback<read_callback>(*this, result, control);
+	cb->kid = id;
+	
+	DNET_SESSION_GET_GROUPS(async_read_result);
+	cb->groups = std::move(groups);
+
+	startCallback(cb);
+	return result;
+}
+
 struct prepare_latest_functor
 {
 	async_result_handler<lookup_result_entry> result;
@@ -887,6 +922,30 @@ async_write_result session::write_data(const key &id, const argument_data &file,
 	ctl.io.user_flags = get_user_flags();
 	ctl.io.offset = remote_offset;
 	ctl.io.size = file.size();
+
+	memcpy(&ctl.id, &raw, sizeof(dnet_id));
+
+	ctl.fd = -1;
+
+	return write_data(ctl);
+}
+
+async_write_result session::write_data_by_original_id(const uint64_t &id, const void *data, uint64_t size)
+{
+	dnet_id raw;
+	transform(raw, id);
+	dnet_io_control ctl;
+
+	memset(&ctl, 0, sizeof(ctl));
+	dnet_empty_time(&ctl.io.timestamp);
+
+	ctl.cflags = get_cflags();
+	ctl.data = data;
+
+	ctl.io.flags = get_ioflags();
+	ctl.io.user_flags = get_user_flags();
+	ctl.io.offset = 0;
+	ctl.io.size = size;
 
 	memcpy(&ctl.id, &raw, sizeof(dnet_id));
 
@@ -1327,6 +1386,12 @@ void session::transform(const data_pointer &data, dnet_id &id) const
 void session::transform(const key &id) const
 {
 	const_cast<key&>(id).transform(*this);
+}
+
+void session::transform(dnet_id &id, const uint64_t &original_id) const
+{	
+    transform(data_pointer::from_raw((void *)&original_id, sizeof(uint64_t)), id);
+    memcpy (id.id + DNET_ID_SIZE - sizeof (original_id), &original_id, sizeof (original_id));
 }
 
 async_lookup_result session::lookup(const key &id)
