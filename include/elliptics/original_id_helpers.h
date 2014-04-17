@@ -15,18 +15,13 @@ const int ORIGINAL_ID_OFFSET_IN_ID = EBLOB_ID_SIZE - sizeof (int64_t);
 static inline void copy_to_eblob_id (uint8_t *eblob_id, uint8_t *dnet_id)
 {
 	memset((void*)eblob_id, 0, EBLOB_ID_SIZE);
-	int i = 0;
-	for (i = 0; i < ORIGINAL_ID_SIZE; i++)
-	{
-		eblob_id [i] = dnet_id [ORIGINAL_ID_OFFSET_IN_ID + i];
-	}
+	memcpy(eblob_id, dnet_id + ORIGINAL_ID_OFFSET_IN_ID, ORIGINAL_ID_SIZE);
 }
 
 static inline void copy_to_dnet_id (uint8_t *dnet_id, uint8_t *eblob_id)
 {
-	dnet_digest_transform_raw(eblob_id + ORIGINAL_ID_OFFSET_IN_ID, ORIGINAL_ID_SIZE, dnet_id, EBLOB_ID_SIZE);
-
-	memcpy(dnet_id, eblob_id + ORIGINAL_ID_OFFSET_IN_ID, ORIGINAL_ID_SIZE);
+	dnet_digest_transform_raw(eblob_id, ORIGINAL_ID_SIZE, dnet_id, EBLOB_ID_SIZE);
+	memcpy(dnet_id + ORIGINAL_ID_OFFSET_IN_ID, eblob_id, ORIGINAL_ID_SIZE);
 }
 
 #ifdef __cplusplus
