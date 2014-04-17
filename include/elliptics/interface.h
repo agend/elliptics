@@ -605,7 +605,7 @@ int dnet_node_state_num(struct dnet_node *n);
 struct dnet_net_state *dnet_state_get_first(struct dnet_node *n, struct dnet_id *id);
 void dnet_state_put(struct dnet_net_state *st);
 
-#define DNET_DUMP_NUM	6
+#define DNET_DUMP_NUM	8
 #define DNET_DUMP_ID_LEN(name, id_struct, data_length) \
 	char name[2 * DNET_ID_SIZE + 16 + 3]; \
 	do { \
