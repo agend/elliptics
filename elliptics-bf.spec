@@ -4,7 +4,7 @@
 Summary:	Distributed hash table storage
 Name:		elliptics
 Version:	2.25.4.5
-Release:	1%{?dist}
+Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
 Group:		System Environment/Libraries
