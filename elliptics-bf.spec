@@ -77,7 +77,7 @@ Elliptics client library (C++/Python bindings), devel files
 %build
 export LDFLAGS="-Wl,-z,defs"
 export DESTDIR="%{buildroot}"
-%{cmake} -DHAVE_MODULE_BACKEND_SUPPORT=no -DWITH_COCAINE=on .
+%{cmake} -DHAVE_MODULE_BACKEND_SUPPORT=no -DWITH_COCAINE=no .
 
 make %{?_smp_mflags}
 
