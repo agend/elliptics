@@ -85,14 +85,15 @@ public:
 	config_data &operator() (const std::string &name, const std::vector<std::string> &value);
 	config_data &operator() (const std::string &name, const std::string &value);
 	config_data &operator() (const std::string &name, const char *value);
-	config_data &operator() (const std::string &name, uint64_t value);
+	config_data &operator() (const std::string &name, int64_t value);
 	config_data &operator() (const std::string &name, int value);
+	config_data &operator() (const std::string &name, bool value);
 
 	bool has_value(const std::string &name) const;
 	std::string string_value(const std::string &name) const;
 
 protected:
-	typedef boost::variant<std::vector<std::string>, std::string, unsigned long long> variant;
+	typedef boost::variant<std::vector<std::string>, std::string, bool, int64_t> variant;
 
 	config_data &operator() (const std::string &name, const variant &value);
 	const variant *value_impl(const std::string &name) const;
@@ -119,7 +120,7 @@ class server_node
 {
 public:
 	server_node();
-	server_node(const std::string &path, const std::string &remote, int monitor_port);
+	server_node(const std::string &path, const std::string &remote, int monitor_port, bool fork);
 	server_node(server_node &&other);
 
 	server_node &operator =(server_node &&other);
@@ -131,6 +132,9 @@ public:
 
 	void start();
 	void stop();
+	void wait_to_stop();
+	bool is_started() const;
+	bool is_stopped() const;
 
 	std::string remote() const;
 	int monitor_port() const;
@@ -141,6 +145,9 @@ private:
 	std::string m_path;
 	std::string m_remote;
 	int m_monitor_port;
+	bool m_fork;
+	bool m_kill_sent;
+	mutable pid_t m_pid;
 };
 
 #endif // NO_SERVER
@@ -163,7 +170,8 @@ struct nodes_data
 
 #ifndef NO_SERVER
 
-nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server_config> &configs, const std::string &path);
+nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server_config> &configs,
+	const std::string &path, bool fork = false, bool monitor = true);
 
 #endif // NO_SERVER
 

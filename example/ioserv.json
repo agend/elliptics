@@ -17,9 +17,8 @@
 		]
 	},
 	"options": {
-		"join": 1,
+		"join": true,
 		"flags": 20,
-		"group": 2,
 		"remote": [
 			"autodiscovery:224.0.0.5:1025:2"
 		],
@@ -31,19 +30,22 @@
 		"io_thread_num": 16,
 		"nonblocking_io_thread_num": 16,
 		"net_thread_num": 4,
-		"daemon": 0,
+		"daemon": false,
 		"auth_cookie": "qwerty",
 		"bg_ionice_class": 3,
 		"bg_ionice_prio": 0,
 		"server_net_prio": 1,
 		"client_net_prio": 6,
-		"cache_size": 68719476736,
+		"cache": {
+			"size": 68719476736
+		},
 		"indexes_shard_count": 2,
 		"monitor_port": 20000
 	},
 	"backends": [
 		{
 			"type": "blob",
+			"group": 2,
 			"history": "/opt/elliptics/history.2",
 			"data": "/opt/elliptics/eblob.2/data",
 			"sync": "-1",

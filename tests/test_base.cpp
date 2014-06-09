@@ -9,9 +9,45 @@
 #include <rapidjson/prettywriter.h>
 
 #include <fstream>
+#include <iostream>
 #include <set>
+#include <signal.h>
+
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#ifdef HAVE_COCAINE
+#  include <cocaine/framework/services/storage.hpp>
+#endif
 
 namespace tests {
+
+static std::string cocaine_config_path()
+{
+	char *result = getenv("TEST_COCAINE_CONFIG");
+	if (!result)
+		throw std::runtime_error("TEST_COCAINE_CONFIG environment variable is no set");
+
+	return result;
+}
+
+static std::string cocaine_config_plugins()
+{
+	char *result = getenv("TEST_COCAINE_PLUGINS");
+	if (!result)
+		throw std::runtime_error("TEST_COCAINE_PLUGINS environment variable is no set");
+
+	return result;
+}
+
+static const char *ioserv_path()
+{
+	char *result = getenv("TEST_IOSERV_PATH");
+	if (!result)
+		return "/usr/bin/dnet_ioserv";
+
+	return result;
+}
 
 ioremap::elliptics::session create_session(ioremap::elliptics::node n, std::initializer_list<int> groups, uint64_t cflags, uint32_t ioflags)
 {
@@ -82,12 +118,17 @@ config_data &config_data::operator()(const std::string &name, const char *value)
 	return (*this)(name, std::string(value));
 }
 
-config_data &config_data::operator()(const std::string &name, uint64_t value)
+config_data &config_data::operator()(const std::string &name, int64_t value)
 {
 	return (*this)(name, variant(value));
 }
 
 config_data &config_data::operator()(const std::string &name, int value)
+{
+	return (*this)(name, variant(int64_t(value)));
+}
+
+config_data &config_data::operator()(const std::string &name, bool value)
 {
 	return (*this)(name, variant(value));
 }
@@ -146,7 +187,7 @@ server_config server_config::default_value()
 {
 	server_config data;
 	data.options
-			("join", 1)
+			("join", true)
 			("flags", 4)
 			("wait_timeout", 60)
 			("check_timeout", 60)
@@ -154,7 +195,7 @@ server_config server_config::default_value()
 			("nonblocking_io_thread_num", 4)
 			("net_thread_num", 2)
 			("indexes_shard_count", 16)
-			("daemon", 0)
+			("daemon", false)
 			("bg_ionice_class", 3)
 			("bg_ionice_prio", 0)
 			("server_net_prio", 1)
@@ -213,7 +254,14 @@ struct json_value_visitor : public boost::static_visitor<>
 		object->AddMember(name, result, *allocator);
 	}
 
-	void operator() (unsigned long long value) const
+	void operator() (bool value) const
+	{
+		rapidjson::Value result;
+		result.SetBool(value);
+		object->AddMember(name, result, *allocator);
+	}
+
+	void operator() (int64_t value) const
 	{
 		rapidjson::Value result;
 		result.SetUint64(value);
@@ -238,11 +286,25 @@ void server_config::write(const std::string &path)
 	rapidjson::Value options_json;
 	options_json.SetObject();
 
+	rapidjson::Value cache_json;
+	cache_json.SetNull();
+
 	for (auto it = options.m_data.begin(); it != options.m_data.end(); ++it) {
-		json_value_visitor visitor(it->first.c_str(), &options_json, &allocator);
+		rapidjson::Value *object = &options_json;
+		const char *key = it->first.c_str();
+
+		if (it->first.compare(0, 6, "cache_") == 0) {
+			if (!cache_json.IsObject())
+				cache_json.SetObject();
+			key = it->first.c_str() + 6;
+			object = &cache_json;
+		}
+
+		json_value_visitor visitor(key, object, &allocator);
 		boost::apply_visitor(visitor, it->second);
 	}
 
+	options_json.AddMember("cache", cache_json, allocator);
 	server.AddMember("options", options_json, allocator);
 
 	rapidjson::Value backends_json;
@@ -281,25 +343,32 @@ void server_config::write(const std::string &path)
 server_config &server_config::apply_options(const config_data &data)
 {
 	for (auto it = data.m_data.begin(); it != data.m_data.end(); ++it) {
-		options(it->first, it->second);
+		if (it->first == "group")
+			backends.front()(it->first, it->second);
+		else
+			options(it->first, it->second);
 	}
 
 	return *this;
 }
 
-server_node::server_node() : m_node(NULL)
+server_node::server_node() : m_node(NULL), m_monitor_port(0), m_fork(false), m_kill_sent(false), m_pid(0)
 {
 }
 
-server_node::server_node(const std::string &path, const std::string &remote, int monitor_port)
-	: m_node(NULL), m_path(path), m_remote(remote), m_monitor_port(monitor_port)
+server_node::server_node(const std::string &path, const std::string &remote, int monitor_port, bool fork)
+	: m_node(NULL), m_path(path), m_remote(remote), m_monitor_port(monitor_port), m_fork(fork), m_kill_sent(false), m_pid(0)
 {
 }
 
 server_node::server_node(server_node &&other) :
-	m_node(other.m_node), m_path(std::move(other.m_path)), m_remote(std::move(other.m_remote)), m_monitor_port(other.monitor_port())
+	m_node(other.m_node), m_path(std::move(other.m_path)), m_remote(std::move(other.m_remote)),
+	m_monitor_port(other.monitor_port()), m_fork(other.m_fork), m_kill_sent(other.m_kill_sent), m_pid(other.m_pid)
 {
 	other.m_node = NULL;
+	other.m_fork = false;
+	other.m_kill_sent = false;
+	other.m_pid = 0;
 }
 
 server_node &server_node::operator =(server_node &&other)
@@ -308,34 +377,115 @@ server_node &server_node::operator =(server_node &&other)
 	std::swap(m_path, other.m_path);
 	std::swap(m_remote, other.m_remote);
 	std::swap(m_monitor_port, other.m_monitor_port);
+	std::swap(m_fork, other.m_fork);
+	std::swap(m_kill_sent, other.m_kill_sent);
+	std::swap(m_pid, other.m_pid);
 
 	return *this;
 }
 
 server_node::~server_node()
 {
-	if (m_node)
+	if (is_started()) {
 		stop();
+		wait_to_stop();
+	}
 }
 
 void server_node::start()
 {
-	if (m_node)
+	if (is_started())
 		throw std::runtime_error("Server node \"" + m_path + "\" is already started");
 
-	m_node = dnet_parse_config(m_path.c_str(), 0);
-	if (!m_node)
+	if (m_fork) {
+		m_kill_sent = false;
+		m_pid = fork();
+		if (m_pid == -1) {
+			m_pid = 0;
+			int err = -errno;
+			throw_error(err, "Failed to fork process");
+		} else if (m_pid == 0) {
+			char buffer[3][1024] = {
+				" ",
+				"-c"
+			};
+			std::string ios_path = ioserv_path();
+			char * const args[] = {
+				const_cast<char*>(ios_path.c_str()),
+				buffer[1],
+				const_cast<char*>(m_path.c_str()),
+				NULL
+			};
+			auto ld_path = std::string("LD_LIBRARY_PATH=") + getenv("LD_LIBRARY_PATH");
+			char * const env[] = {
+				const_cast<char*>(ld_path.c_str()),
+				NULL
+			};
+			if (execve(ios_path.data(), args, env) == -1) {
+				int err = -errno;
+				std::cerr << create_error(err, "Failed to start process \"%s\"", ios_path.c_str()).message() << std::endl;
+				quick_exit(1);
+			}
+		}
+	} else {
+		m_node = dnet_parse_config(m_path.c_str(), 0);
+	}
+
+	if (!is_started())
 		throw std::runtime_error("Can not start server with config file: \"" + m_path + "\"");
 }
 
 void server_node::stop()
 {
-	if (!m_node)
+	if (!is_started())
 		throw std::runtime_error("Server node \"" + m_path + "\" is already stoped");
 
-	dnet_set_need_exit(m_node);
-	dnet_server_node_destroy(m_node);
-	m_node = NULL;
+	if (m_fork) {
+		if (!m_kill_sent) {
+			m_kill_sent = true;
+			kill(m_pid, SIGTERM);
+		}
+	} else {
+		dnet_set_need_exit(m_node);
+	}
+}
+
+void server_node::wait_to_stop()
+{
+	if (m_fork) {
+		int result;
+		waitpid(m_pid, &result, 0);
+		m_pid = 0;
+	} else if (m_node) {
+		dnet_server_node_destroy(m_node);
+		m_node = NULL;
+	}
+}
+
+bool server_node::is_started() const
+{
+	return !is_stopped();
+}
+
+bool server_node::is_stopped() const
+{
+	if (!m_fork)
+		return !m_node;
+
+	if (m_pid) {
+		int result;
+		int err = waitpid(m_pid, &result, WNOHANG);
+		if (err == 0) {
+			return false;
+		} else if (err == -1) {
+			err = -errno;
+			throw_error(err, "Failed to check status of pid: %d", int(m_pid));
+		}
+
+		m_pid = 0;
+	}
+
+	return true;
 }
 
 std::string server_node::remote() const
@@ -392,13 +542,52 @@ static bool is_bindable(int port)
 
 static std::vector<std::string> generate_ports(size_t count, std::set<std::string> &ports)
 {
+	std::vector<std::pair<int, int>> ranges;
+	const int first_valid = 1025;
+	const int last_valid = 65535;
+
+	std::ifstream range("/proc/sys/net/ipv4/ip_local_port_range");
+	if (range) {
+		int first_invalid = 0;
+		int last_invalid = 0;
+		range >> first_invalid >> last_invalid;
+
+		first_invalid = std::max(first_invalid, first_valid);
+		last_invalid = std::min(last_invalid, last_valid);
+
+		if (first_invalid > first_valid)
+			ranges.emplace_back(first_valid, first_invalid - 1);
+		if (last_invalid < last_valid)
+			ranges.emplace_back(last_invalid + 1, last_valid);
+	} else {
+		ranges.emplace_back(first_valid, last_valid);
+	}
+
+	int ranges_sum = 0;
+	for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+		ranges_sum += it->second - it->first + 1;
+	}
+
+	if (ranges_sum == 0)
+		throw std::runtime_error("Failed to find enough count of bindable ports for elliptics servers");
+
 	std::vector<std::string> result;
 
 	size_t bind_errors_count = 0;
 
 	while (result.size() < count) {
-		// Random port from 10000 to 60000
-		int port = 10000 + (rand() % 50000);
+		// Choose one random port from available ranges
+		int tmp = rand() % ranges_sum;
+		int port = 0;
+		for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+			if (tmp >= it->second - it->first + 1) {
+				tmp -= it->second - it->first + 1;
+			} else {
+				port = it->first + tmp;
+				break;
+			}
+		}
+
 		std::string port_str = boost::lexical_cast<std::string>(port);
 		if (ports.find(port_str) != ports.end())
 			continue;
@@ -412,6 +601,7 @@ static std::vector<std::string> generate_ports(size_t count, std::set<std::strin
 
 		result.push_back(port_str);
 		ports.insert(port_str);
+		bind_errors_count = 0;
 	}
 
 	return result;
@@ -445,13 +635,13 @@ static void create_cocaine_config(const std::string &config_path, const std::str
 
 static void start_client_nodes(const nodes_data::ptr &data, std::ostream &debug_stream, const std::vector<std::string> &remotes);
 
-nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server_config> &configs, const std::string &path)
+nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server_config> &configs, const std::string &path, bool fork, bool monitor)
 {
 	nodes_data::ptr data = std::make_shared<nodes_data>();
 
 	std::string base_path;
 	std::string auth_cookie;
-	std::string cocaine_config_template = read_file(COCAINE_CONFIG_PATH);
+	std::string cocaine_config_template;
 	std::string run_path;
 
 	{
@@ -468,7 +658,9 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 
 	std::set<std::string> all_ports;
 	const auto ports = generate_ports(configs.size(), all_ports);
-	const auto monitor_ports = generate_ports(configs.size(), all_ports);
+	const auto monitor_ports = monitor
+		? generate_ports(configs.size(), all_ports)
+		: std::vector<std::string>(configs.size(), "0");
 
 	if (path.empty()) {
 		char buffer[1024];
@@ -504,17 +696,19 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 		if (j > 0)
 			cocaine_remotes += ", ";
 		cocaine_remotes += "\"localhost:" + ports[j] + ":2\"";
-		const std::string group = configs[j].options.string_value("group");
-		if (cocaine_unique_groups.find(group) == cocaine_unique_groups.end()) {
-			if (!cocaine_groups.empty())
-				cocaine_groups += ", ";
-			cocaine_groups += group;
+		for (auto it = configs[j].backends.begin(); it != configs[j].backends.end(); ++it) {
+			const std::string group = it->string_value("group");
+			if (cocaine_unique_groups.insert(group).second) {
+				if (!cocaine_groups.empty())
+					cocaine_groups += ", ";
+				cocaine_groups += group;
+			}
 		}
 	}
 
 	const auto cocaine_locator_ports = generate_ports(configs.size(), all_ports);
-	// client only needs connection to one (any) locator service
-	data->locator_port = std::stoul(cocaine_locator_ports[0]);
+
+	std::vector<int> locator_ports;
 
 	debug_stream << "Starting " << configs.size() << " servers" << std::endl;
 
@@ -543,11 +737,20 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 		if (config.options.has_value("srw_config")) {
 			const std::string server_run_path = run_path + server_suffix;
 
+			if (cocaine_config_template.empty())
+				cocaine_config_template = read_file(cocaine_config_path().c_str());
+
 			create_directory(server_run_path);
+
+			// client only needs connection to one (any) locator service
+			if (!data->locator_port)
+				data->locator_port = boost::lexical_cast<int>(cocaine_locator_ports[i]);
+
+			locator_ports.push_back(boost::lexical_cast<int>(cocaine_locator_ports[i]));
 
 			const substitute_context cocaine_variables = {
 				{ "COCAINE_LOCATOR_PORT", cocaine_locator_ports[i] },
-				{ "COCAINE_PLUGINS_PATH", COCAINE_PLUGINS_PATH },
+				{ "COCAINE_PLUGINS_PATH", cocaine_config_plugins() },
 				{ "ELLIPTICS_REMOTES", cocaine_remotes },
 				{ "ELLIPTICS_GROUPS", cocaine_groups },
 				{ "COCAINE_LOG_PATH", server_path + "/cocaine.log" },
@@ -576,7 +779,8 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 
 		server_node server(server_path + "/ioserv.conf",
 			create_remote(ports[i]),
-			boost::lexical_cast<int>(monitor_ports[i]));
+			boost::lexical_cast<int>(monitor_ports[i]),
+			fork);
 
 		try {
 			server.start();
@@ -601,14 +805,56 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 		data->nodes.emplace_back(std::move(server));
 	}
 
-	{
+	for (;;) {
+		sleep(1);
+
+		for (size_t i = 0; i < data->nodes.size(); ++i) {
+			if (data->nodes[i].is_stopped()) {
+				debug_stream << "Failed to start server #" << (i + 1) << std::endl;
+				throw std::runtime_error("Failed to configure servers");
+			}
+		}
+
+#ifdef HAVE_COCAINE
+		bool any_failed = false;
+
+		for (size_t i = 0; i < locator_ports.size(); ++i) {
+			try {
+				using namespace cocaine::framework;
+
+				service_manager_t::endpoint_t endpoint("127.0.0.1", locator_ports[i]);
+				auto manager = service_manager_t::create(endpoint);
+				auto storage = manager->get_service<storage_service_t>("storage");
+				(void) storage;
+
+				debug_stream << "Succesfully connected to Cocaine #" << (i + 1) << std::endl;
+			} catch (std::exception &) {
+				any_failed = true;
+				break;
+			}
+		}
+
+		if (any_failed) {
+			debug_stream << "Cocaine has not been started yet, try again in 1 second" << std::endl;
+			continue;
+		}
+#endif
+		break;
+	}
+
+	try {
 		std::vector<std::string> remotes;
 		for (size_t i = 0; i < data->nodes.size(); ++i) {
 			remotes.push_back(data->nodes[i].remote());
 		}
 
 		start_client_nodes(data, debug_stream, remotes);
+	} catch (std::exception &e) {
+		debug_stream << "Failed to connect to servers: " << e.what() << std::endl;
+		throw;
 	}
+
+	debug_stream << "Started servers" << std::endl;
 
 	return data;
 }
@@ -669,8 +915,10 @@ std::string read_file(const char *file_path)
 nodes_data::~nodes_data()
 {
 #ifndef NO_SERVER
-	for (auto it = nodes.begin(); it != nodes.end(); ++it)
-		dnet_set_need_exit(it->get_native());
+	for (auto it = nodes.begin(); it != nodes.end(); ++it) {
+		if (!it->is_stopped())
+			it->stop();
+	}
 #endif // NO_SERVER
 }
 

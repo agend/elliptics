@@ -100,7 +100,7 @@ struct dnet_io_req {
 /* Attached data should be discarded */
 #define DNET_IO_DROP		(1<<1)
 
-#define DNET_STATE_MAX_WEIGHT		(1024 * 10)
+#define DNET_STATE_DEFAULT_WEIGHT	1.0
 
 /* Iterator watermarks for sending data and sleeping */
 #define DNET_SEND_WATERMARK_HIGH	(1024 * 100)
@@ -162,8 +162,7 @@ struct dnet_net_state
 
 	int			la;
 	unsigned long long	free;
-	float			weight;
-	long			median_read_time;
+	double			weight;
 
 	struct dnet_idc		*idc;
 
@@ -207,8 +206,8 @@ void dnet_state_clean(struct dnet_net_state *st);
 void dnet_state_remove_nolock(struct dnet_net_state *st);
 
 struct dnet_net_state *dnet_state_search_by_addr(struct dnet_node *n, struct dnet_addr *addr);
-struct dnet_net_state *dnet_state_get_first(struct dnet_node *n, struct dnet_id *id);
-struct dnet_net_state *dnet_state_search_nolock(struct dnet_node *n, struct dnet_id *id);
+struct dnet_net_state *dnet_state_get_first(struct dnet_node *n, const struct dnet_id *id);
+struct dnet_net_state *dnet_state_search_nolock(struct dnet_node *n, const struct dnet_id *id);
 struct dnet_net_state *dnet_node_state(struct dnet_node *n);
 
 void dnet_node_cleanup_common_resources(struct dnet_node *n);
@@ -573,7 +572,7 @@ struct dnet_node
 
 	void			*monitor;
 
-	void			*react_manager;
+	void			*react_aggregator;
 
 	struct dnet_config_data *config_data;
 };
@@ -659,7 +658,7 @@ int dnet_send_request(struct dnet_net_state *st, struct dnet_io_req *r);
 int __attribute__((weak)) dnet_send_ack(struct dnet_net_state *st, struct dnet_cmd *cmd, int err, int recursive);
 
 struct dnet_config;
-int dnet_socket_create(struct dnet_node *n, char *addr_str, int port, struct dnet_addr *addr, int listening);
+int dnet_socket_create(struct dnet_node *n, const char *addr_str, int port, struct dnet_addr *addr, int listening);
 int dnet_socket_create_addr(struct dnet_node *n, struct dnet_addr *addr, int listening);
 
 void dnet_set_sockopt(struct dnet_node *n, int s);

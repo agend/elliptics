@@ -139,7 +139,7 @@ void dnet_monitor_init_react_stat_provider(struct dnet_node *n) {
 		try {
 			auto provider = new ioremap::monitor::react_stat_provider();
 			real_monitor->get_statistics().add_provider(provider, "call_tree");
-			n->react_manager = static_cast<void*> (&provider->get_react_manager());
+			n->react_aggregator = static_cast<void*> (&provider->get_react_aggregator());
 		} catch (std::exception &e) {
 			std::cerr << e.what() << std::endl;
 		}
@@ -157,15 +157,15 @@ int dnet_monitor_process_cmd(struct dnet_net_state *orig, struct dnet_cmd *cmd _
 
 	if ((req->category >= __DNET_MONITOR_MAX) || (req->category < 0)) {
 		static const std::string rep = "{\"monitor_status\":\"invalid category\"}";
-		return dnet_send_reply(orig, cmd, const_cast<char *>(rep.c_str()), rep.size(), 0);
+		return dnet_send_reply(orig, cmd, rep.c_str(), rep.size(), 0);
 	}
 
 	if (!n->monitor)
-		return dnet_send_reply(orig, cmd, const_cast<char*>(disabled_reply.c_str()), disabled_reply.size(), 0);
+		return dnet_send_reply(orig, cmd, disabled_reply.c_str(), disabled_reply.size(), 0);
 
 	auto real_monitor = monitor_cast(n->monitor);
 	if (!real_monitor)
-		return dnet_send_reply(orig, cmd, const_cast<char*>(disabled_reply.c_str()), disabled_reply.size(), 0);
+		return dnet_send_reply(orig, cmd, disabled_reply.c_str(), disabled_reply.size(), 0);
 
 	auto json = real_monitor->get_statistics().report(req->category);
 	return dnet_send_reply(orig, cmd, &*json.begin(), json.size(), 0);

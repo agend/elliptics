@@ -3,7 +3,7 @@
 
 Summary:	Distributed hash table storage
 Name:		elliptics
-Version:	2.25.4.5
+Version:	2.25.4.16
 Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
@@ -13,15 +13,16 @@ Source0:	%{name}-%{version}.tar.bz2
 BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 BuildRequires:	python-devel
-#BuildRequires:	libcocaine-core2-devel >= 0.11.2.1
-#BuildRequires:  cocaine-framework-native-devel >= 0.11.0.1
-BuildRequires:	eblob-devel >= 0.21.32
-BuildRequires:	react-devel >= 1.0.2
-BuildRequires:	cmake msgpack-devel
+BuildRequires:	libcocaine-core2-devel >= 0.11.2.0
+BuildRequires:  cocaine-framework-native-devel >= 0.11.0.0
+BuildRequires:	eblob-devel >= 0.21.40
+BuildRequires:	react-devel >= 2.3.1
+BuildRequires:	libev-devel libtool-ltdl-devel
+BuildRequires:	cmake msgpack-devel libblackhole-devel python-msgpack
 
 %define boost_ver %{nil}
 
-BuildRequires:	boost%{boost_ver}-devel, boost%{boost_ver}-iostreams, boost%{boost_ver}-python, boost%{boost_ver}-system, boost%{boost_ver}-thread, boost%{boost_ver}-filesystem
+BuildRequires:	boost%{boost_ver}-devel
 BuildRequires:	python-virtualenv
 
 Obsoletes: srw
@@ -52,6 +53,14 @@ Group:		Development/Libraries
 %description client
 Elliptics client library (C++/Python bindings)
 
+%package -n cocaine-plugin-elliptics
+Summary: Elliptics plugin for Cocaine
+Group: Development/Libraries
+Requires: %{name} = %{version}-%{release}
+
+%description -n cocaine-plugin-elliptics
+cocaine-plugin-elliptics
+
 
 %package client-devel
 Summary:	Elliptics library C++ binding development headers and libraries
@@ -68,7 +77,7 @@ Elliptics client library (C++/Python bindings), devel files
 %build
 export LDFLAGS="-Wl,-z,defs"
 export DESTDIR="%{buildroot}"
-%{cmake} -DHAVE_MODULE_BACKEND_SUPPORT=no -DWITH_COCAINE=OFF .
+%{cmake} -DHAVE_MODULE_BACKEND_SUPPORT=no -DWITH_COCAINE=on .
 
 make %{?_smp_mflags}
 
@@ -92,18 +101,29 @@ rm -rf %{buildroot}
 %files
 %defattr(-,root,root,-)
 %doc README
-%{_bindir}/*
+%{_bindir}/dnet_ioserv
 %{_libdir}/libelliptics.so.*
-%{_libdir}/libelliptics_cocaine.so.*
 %{_mandir}/man1/*
 
 %files devel
 %defattr(-,root,root,-)
+%{_bindir}/dnet_run_servers
 %{_libdir}/libelliptics.so
-%{_libdir}/libelliptics_cocaine.so
+
+%files -n cocaine-plugin-elliptics
+%defattr(-,root,root,-)
+%{_libdir}/cocaine/elliptics-extensions.cocaine-plugin
 
 %files client
 %defattr(-,root,root,-)
+%{_bindir}/dnet_find
+%{_bindir}/dnet_ioclient
+%{_bindir}/dnet_index
+%{_bindir}/dnet_stat
+%{_bindir}/dnet_notify
+%{_bindir}/dnet_ids
+%{_bindir}/dnet_balancer
+%{_bindir}/dnet_recovery
 %{_libdir}/libelliptics_client.so.*
 %{_libdir}/libelliptics_cpp.so.*
 %{_libdir}/libelliptics_monitor.so.*
@@ -123,6 +143,88 @@ rm -rf %{buildroot}
 
 
 %changelog
+* Fri Jun 06 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.16
+- spec: do not require boost libraries, they will be populated from devel package version
+- debian: do not install libelliptics_cocaine.so.*, it is being built statically now
+- Don't link with json
+- spec: added libtool-ltdl-devel dependency for cocaine
+- spec: added libev dependency for cocaine
+
+* Thu Jun 05 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.15
+- srw: Added commentary about event's naming
+- library: made dnet_request_cmd() non-blocking
+- rpm: Enable build with Cocaine
+- srw: Removed app@ part from Cocaine event
+- tests: Check status code for every entry in bulk_write
+- tests: Don't use ports from ip_local_port_range
+
+* Tue May 20 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.14
+- build: depend on 0.21.40+ eblob to force double eblob size reservation
+- io: do not proceed IO command to backend if cache-only IO flag has been set
+- ioserv: exit with negative error status if ioserv could not start because of config error
+- config: updated blob flags doc
+- build: remove generated pyversions at clean
+- build: removed deprecated XB-Python*. Updated url at setup.py.
+
+* Thu May 15 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.13
+- state: new weight adjusting mechanism
+
+* Tue May 13 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.12
+- rpm: fixed msgpack for python package name.
+- core: request route list from node after reconnect.
+- debian: fixed build on lucid: there is no dh_python here and we have to use python-central.
+- debian: dh-python instead of python-support
+- Core: fixed requesting route list always from the same node per group.
+- Recovery: Added msgpack-python to dependencies.
+- Recovery: disabled csum when reading pieces of object.
+- cocaine: Improved elliptics-storage configs
+-     You can set timeouts for read, write, remove and find
+-     You can set success-copies-num to any, quorum or all
+- trans: when filling local-io before read completion, we should check transaction allocation size
+- monitor: Data race during printing of react_aggregator fixed
+
+* Thu May 01 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.11
+- tests: Add random seed to dnet_run_servers
+
+* Wed Apr 30 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.10
+- build: depend on 0.21.37+ eblob
+- Recovery: updated recovery.qdoc: added merge/dc examples.
+- debian: react version 2.3.1 update
+- Python: turned on srw tests. Removed setting group_id in Session.transform
+- stat: react_stat_provider and react_aggregator refactored
+- state: change state weight according to io size. do not change weight if it was cache IO
+- log: increased format buffer size
+- config: example config bool values fixed
+- Tests: provide LD_LIBRARY_PATH into execve child
+- Cache: added setting n->need_exit before stopping cache: it is used by life_check thread. Tests: fixed moving group into backend section.
+- Recovery: added dc_recovery.py - build-in custom recovery function for dc. Added recovery.qdoc.
+- Recovery: replaced dc by sdc. Added ability to split big files while merge recovery (dc recovery will get it soon).
+- session: when creating new session setup wait-ts from the node
+- config: Fixed config example
+- config: Reimplemented configuration parser
+- route: lower final route reply message log level
+- tests: Pass envs directly to executable
+
+* Fri Apr 25 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.25.4.9
+- tests: Configure run_servers by envvars
+- rpm: Add dependency on libblackhole
+
+* Fri Apr 25 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.25.4.8
+- Don't set rpath for dnet_run_servers
+
+* Fri Apr 25 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.25.4.7
+- Upped elliptics version
+
+* Fri Apr 25 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.25.4.6-1
+- 
+- Fixed package details
+
+* Tue Apr 22 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.6
+- Core: stops threads before joining them in case we got some error while creating node.
+- tests: Added fork and monitor options to dnet_run_servers
+- API: Removed most of const_cast's uses. Added move semantic to async_result
+- package: Places binaries to correct packages
+
 * Thu Apr 17 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.5
 - Python: fixed pickling elliptics.Id
 

@@ -26,14 +26,24 @@
 
 namespace ioremap { namespace monitor {
 
+react_stat_provider::react_stat_provider() {
+}
+
 std::string react_stat_provider::json() const {
 	rapidjson::Document doc;
 	doc.SetObject();
 	auto &allocator = doc.GetAllocator();
 
-	rapidjson::Value last_call_tree(rapidjson::kObjectType);
-	react_manager.get_last_call_tree()->to_json(last_call_tree, allocator);
-	doc.AddMember("last_call_tree", last_call_tree, allocator);
+	{
+		std::lock_guard<std::mutex> guard(react_aggregator.mutex);
+		rapidjson::Value aggregator_value(rapidjson::kArrayType);
+		for (auto it = react_aggregator.recent_call_trees.begin(); it != react_aggregator.recent_call_trees.end(); ++it) {
+			rapidjson::Value tree_value(rapidjson::kObjectType);
+			(*it).to_json(tree_value, allocator);
+			aggregator_value.PushBack(tree_value, allocator);
+		}
+		doc.AddMember("react_aggregator", aggregator_value, allocator);
+	}
 
 	rapidjson::StringBuffer buffer;
 	rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
@@ -45,8 +55,8 @@ bool react_stat_provider::check_category(int category) const {
 	return category == DNET_MONITOR_CALL_TREE || category == DNET_MONITOR_ALL;
 }
 
-react::elliptics_react_manager_t &react_stat_provider::get_react_manager() {
-	return react_manager;
+react::elliptics_react_aggregator_t &react_stat_provider::get_react_aggregator() {
+	return react_aggregator;
 }
 
 }} /* namespace ioremap::monitor */

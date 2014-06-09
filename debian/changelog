@@ -1,3 +1,121 @@
+elliptics (2.25.4.16) unstable; urgency=low
+
+  * spec: do not require boost libraries, they will be populated from devel package version
+  * debian: do not install libelliptics_cocaine.so.*, it is being built statically now
+  * Don't link with json
+  * spec: added libtool-ltdl-devel dependency for cocaine
+  * spec: added libev dependency for cocaine
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Fri, 06 Jun 2014 19:29:21 +0400
+
+elliptics (2.25.4.15) unstable; urgency=low
+
+  * srw: Added commentary about event's naming
+  * library: made dnet_request_cmd() non-blocking
+  * rpm: Enable build with Cocaine
+  * srw: Removed app@ part from Cocaine event
+  * tests: Check status code for every entry in bulk_write
+  * tests: Don't use ports from ip_local_port_range
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Thu, 05 Jun 2014 22:02:34 +0400
+
+elliptics (2.25.4.14) unstable; urgency=low
+
+  * build: depend on 0.21.40+ eblob to force double eblob size reservation
+  * io: do not proceed IO command to backend if cache-only IO flag has been set
+  * ioserv: exit with negative error status if ioserv could not start because of config error
+  * config: updated blob flags doc
+  * build: remove generated pyversions at clean
+  * build: removed deprecated XB-Python*. Updated url at setup.py.
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Tue, 20 May 2014 22:28:01 +0400
+
+elliptics (2.25.4.13) unstable; urgency=low
+
+  * state: new weight adjusting mechanism
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Thu, 15 May 2014 00:30:05 +0400
+
+elliptics (2.25.4.12) unstable; urgency=low
+
+  * rpm: fixed msgpack for python package name.
+  * core: request route list from node after reconnect.
+  * debian: fixed build on lucid: there is no dh_python here and we have to use python-central.
+  * debian: dh-python instead of python-support
+  * Core: fixed requesting route list always from the same node per group.
+  * Recovery: Added msgpack-python to dependencies.
+  * Recovery: disabled csum when reading pieces of object.
+  * cocaine: Improved elliptics-storage configs
+  *     You can set timeouts for read, write, remove and find
+  *     You can set success-copies-num to any, quorum or all
+  * trans: when filling local-io before read completion, we should check transaction allocation size
+  * monitor: Data race during printing of react_aggregator fixed
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Tue, 13 May 2014 18:45:21 +0400
+
+elliptics (2.25.4.11) unstable; urgency=low
+
+  * tests: Add random seed to dnet_run_servers
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Thu, 01 May 2014 06:38:40 +0400
+
+elliptics (2.25.4.10) unstable; urgency=low
+
+  * build: depend on 0.21.37+ eblob
+  * Recovery: updated recovery.qdoc: added merge/dc examples.
+  * debian: react version 2.3.1 update
+  * Python: turned on srw tests. Removed setting group_id in Session.transform
+  * stat: react_stat_provider and react_aggregator refactored
+  * state: change state weight according to io size. do not change weight if it was cache IO
+  * log: increased format buffer size
+  * config: example config bool values fixed
+  * Tests: provide LD_LIBRARY_PATH into execve child
+  * Cache: added setting n->need_exit before stopping cache: it is used by life_check thread. Tests: fixed moving group into backend section.
+  * Recovery: added dc_recovery.py - build-in custom recovery function for dc. Added recovery.qdoc.
+  * Recovery: replaced dc by sdc. Added ability to split big files while merge recovery (dc recovery will get it soon).
+  * session: when creating new session setup wait-ts from the node
+  * config: Fixed config example
+  * config: Reimplemented configuration parser
+  * route: lower final route reply message log level
+  * tests: Pass envs directly to executable
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Wed, 30 Apr 2014 00:03:48 +0400
+
+elliptics (2.25.4.9) unstable; urgency=low
+
+  * tests: Configure run_servers by envvars
+  * rpm: Add dependency on libblackhole
+
+ -- Ruslan Nigmatullin <euroelessar@yandex.ru>  Fri, 25 Apr 2014 20:24:14 +0400
+
+elliptics (2.25.4.8) unstable; urgency=low
+
+  * Don't set rpath for dnet_run_servers
+
+ -- Ruslan Nigmatullin <euroelessar@yandex.ru>  Fri, 25 Apr 2014 17:54:53 +0400
+
+elliptics (2.25.4.7) unstable; urgency=low
+
+  * Upped elliptics version
+
+ -- Ruslan Nigmatullin <euroelessar@yandex.ru>  Fri, 25 Apr 2014 16:15:47 +0400
+
+elliptics (2.25.4.6-1) unstable; urgency=low
+
+  * 
+  * Fixed package details
+
+ -- Ruslan Nigmatullin <euroelessar@yandex.ru>  Fri, 25 Apr 2014 16:03:10 +0400
+
+elliptics (2.25.4.6) unstable; urgency=low
+
+  * Core: stops threads before joining them in case we got some error while creating node.
+  * tests: Added fork and monitor options to dnet_run_servers
+  * API: Removed most of const_cast's uses. Added move semantic to async_result
+  * package: Places binaries to correct packages
+
+ -- Evgeniy Polyakov <zbr@ioremap.net>  Tue, 22 Apr 2014 15:28:39 +0400
+
 elliptics (2.25.4.5) unstable; urgency=low
 
   * Python: fixed pickling elliptics.Id

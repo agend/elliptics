@@ -257,9 +257,19 @@ bool positive(const callback_result_entry &entry)
 	return entry.status() == 0 && !entry.data().empty();
 }
 
+bool positive_with_ack(const callback_result_entry &entry)
+{
+	return entry.status() == 0;
+}
+
 bool negative(const callback_result_entry &entry)
 {
 	return entry.status() != 0;
+}
+
+bool negative_with_ack(const callback_result_entry &entry)
+{
+	return entry.status() != 0 || entry.data().empty();
 }
 
 bool all(const callback_result_entry &entry)
@@ -480,7 +490,7 @@ dnet_id session::get_direct_id()
 	return *dnet_session_get_direct_id(get_native());
 }
 
-void session::set_direct_id(dnet_addr remote_addr)
+void session::set_direct_id(const dnet_addr &remote_addr)
 {
 	std::vector<std::pair<struct dnet_id, dnet_addr> > routes = get_routes();
 
@@ -498,6 +508,11 @@ void session::set_direct_id(dnet_addr remote_addr)
 	throw ioremap::elliptics::error(-ESRCH, "Route not found");
 }
 
+void session::set_direct_id(const std::string &addr, int port, int family)
+{
+	set_direct_id(addr.c_str(), port, family);
+}
+
 void session::set_direct_id(const char *saddr, int port, int family)
 {
 	dnet_addr addr;
@@ -509,7 +524,7 @@ void session::set_direct_id(const char *saddr, int port, int family)
 
 	err = dnet_fill_addr(&addr, saddr, port, SOCK_STREAM, IPPROTO_TCP);
 	if (err != 0)
-		throw ioremap::elliptics::error(err, "dnet_fill_addr failed");
+		throw_error(err, "dnet_fill_addr failed: addr: %s, port: %d, family: %d", saddr, port, family);
 
 	set_direct_id(addr);
 }
@@ -529,14 +544,16 @@ void session::set_ioflags(uint32_t ioflags)
 	dnet_session_set_ioflags(m_data->session_ptr, ioflags);
 }
 
+void session::set_namespace(const std::string &ns)
+{
+	set_namespace(ns.c_str(), ns.size());
+}
+
 void session::set_namespace(const char *ns, int nsize)
 {
-	int err;
-
-	err = dnet_session_set_ns(m_data->session_ptr, ns, nsize);
+	int err = dnet_session_set_ns(m_data->session_ptr, ns, nsize);
 	if (err) {
-		std::string tmp(ns, nsize);
-		throw ioremap::elliptics::error(err, "Could not set namespace '" + tmp + "'");
+		throw_error(err, "Could not set namespace '%s'", ns);
 	}
 }
 
@@ -555,7 +572,12 @@ uint64_t session::get_user_flags() const
 	return dnet_session_get_user_flags(m_data->session_ptr);
 }
 
-void session::set_timestamp(dnet_time *ts)
+void session::set_timestamp(const dnet_time &ts)
+{
+	dnet_session_set_timestamp(m_data->session_ptr, &ts);
+}
+
+void session::set_timestamp(const dnet_time *ts)
 {
 	dnet_session_set_timestamp(m_data->session_ptr, ts);
 }
@@ -771,7 +793,7 @@ struct prepare_latest_functor
 	void operator() (std::vector<lookup_result_entry> results, const error_info &error)
 	{
 		comparator cmp;
-		sort(results.begin(), results.end(), cmp);
+		std::stable_sort(results.begin(), results.end(), cmp);
 		for (auto it = results.begin(); it != results.end(); ++it)
 			result.process(*it);
 
@@ -800,7 +822,7 @@ async_lookup_result session::prepare_latest(const key &id, const std::vector<int
 	}
 	transform(id);
 
-	std::list<async_lookup_result> lookup_results;
+	std::vector<async_lookup_result> lookup_results;
 
 	{
 		session_scope scope(*this);
@@ -1164,7 +1186,7 @@ struct cas_functor : std::enable_shared_from_this<cas_functor>
 		write_sess.set_exceptions_policy(session::no_exceptions);
 		write_sess.set_groups(std::vector<int>());
 
-		std::list<async_write_result> write_results;
+		std::vector<async_write_result> write_results;
 
 		std::vector<int> write_groups;
 		std::swap(write_groups, groups);
@@ -1353,7 +1375,7 @@ std::string session::lookup_address(const key &id, int group_id)
 	int err = dnet_lookup_addr(m_data->session_ptr,
 		id.by_id() ? NULL : id.remote().c_str(),
 		id.by_id() ? 0 : id.remote().size(),
-		id.by_id() ? const_cast<dnet_id*>(&id.id()) : NULL,
+		id.by_id() ? &id.id() : NULL,
 		group_id, buf, sizeof(buf));
 	if (err < 0) {
 		if (id.by_id()) {
@@ -1388,7 +1410,7 @@ void session::transform(const data_pointer &data, dnet_id &id) const
 
 void session::transform(const key &id) const
 {
-	const_cast<key&>(id).transform(*this);
+	id.transform(*this);
 }
 
 void session::transform(dnet_id &id, const uint64_t &original_id) const
@@ -2101,7 +2123,7 @@ async_write_result session::bulk_write(const std::vector<dnet_io_attr> &ios, con
 		}
 	}
 
-	std::list<async_write_result> results;
+	std::vector<async_write_result> results;
 
 	{
 		session_scope scope(*this);
