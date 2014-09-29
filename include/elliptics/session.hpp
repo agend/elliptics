@@ -24,7 +24,7 @@
 
 #include "result_entry.hpp"
 #include "packet.h"
-#include "interface.h"
+#include "logger.hpp"
 
 namespace ioremap { namespace elliptics {
 
@@ -34,26 +34,29 @@ typedef std::function<bool (const callback_result_entry &)> result_filter;
 typedef std::function<bool (const std::vector<dnet_cmd> &, size_t)> result_checker;
 typedef std::function<void (const error_info &, const std::vector<dnet_cmd> &)> result_error_handler;
 
-/*
+/*!
  * Built-in filters.
  *
- * IT IS ALSO PROVIDED IN PYTHON BINDING so if you want to add new built-in filter
+ * \attention IT IS ALSO PROVIDED IN PYTHON BINDING so if you want to add new built-in filter
  * please also add it to elliptics_filters in elliptics_session.cpp
  */
 namespace filters
 {
 bool positive(const callback_result_entry &entry);
 bool positive_with_ack(const callback_result_entry &entry);
+bool positive_final(const callback_result_entry &entry);
 bool negative(const callback_result_entry &entry);
 bool negative_with_ack(const callback_result_entry &entry);
+bool negative_final(const callback_result_entry &entry);
 bool all(const callback_result_entry &entry);
 bool all_with_ack(const callback_result_entry &entry);
+bool all_final(const callback_result_entry &entry);
 }
 
-/*
+/*!
  * Built-in checkers.
  *
- * IT IS ALSO PROVIDED IN PYTHON BINDING so if you want to add new built-in checker
+ * \attention IT IS ALSO PROVIDED IN PYTHON BINDING so if you want to add new built-in checker
  * please also add it to elliptics_checkers in elliptics_session.cpp
  */
 namespace checkers
@@ -92,6 +95,8 @@ class transport_control
 	public:
 		transport_control();
 		transport_control(const dnet_id &id, unsigned int cmd, uint64_t cflags = 0);
+		transport_control(const dnet_trans_control &control);
+		~transport_control();
 
 		void set_key(const dnet_id &id);
 		void set_command(unsigned int cmd);
@@ -104,51 +109,45 @@ class transport_control
 		dnet_trans_control m_data;
 };
 
-struct address
+class address
 {
-	address(const std::string &l_host, const int l_port, const int l_family = AF_INET)
-		: host(l_host), port(l_port), family(l_family) {}
+public:
+	address();
+	address(const std::string &host, int port, int family = AF_INET);
+	address(const char *host, int port, int family = AF_INET);
+	address(const std::string &addr);
+	address(const char *addr);
+	address(const dnet_addr &addr);
+	~address();
 
-	std::string		host;
-	int			port;
-	int			family;
+	address(const address &other);
+	address &operator =(const address &other);
+
+	bool operator ==(const address &other) const;
+
+	bool is_valid() const;
+
+	std::string host() const;
+	int port() const;
+	int family() const;
+
+	std::string to_string() const;
+	std::string to_string_with_family() const;
+	const dnet_addr &to_raw() const;
+
+private:
+	dnet_addr m_addr;
 };
 
-class logger_interface
+inline bool operator ==(const dnet_addr &first, const address &second)
 {
-	public:
-		virtual ~logger_interface() {}
+	return dnet_addr_equal(&first, &second.to_raw());
+}
 
-		virtual void log(const int level, const char *msg) = 0;
-};
-
-class logger_data;
-
-class logger
+inline bool operator ==(const address &first, const dnet_addr &second)
 {
-	public:
-		explicit logger(logger_interface *interface, const int level);
-		logger();
-		logger(const logger &other);
-		~logger();
-
-		logger &operator =(const logger &other);
-
-		void 		log(const int level, const char *msg);
-		void 		print(int level, const char *format, ...) __attribute__ ((format(printf, 3, 4)));
-		int			get_log_level();
-		dnet_log		*get_native();
-
-	protected:
-		std::shared_ptr<logger_data> m_data;
-};
-
-class file_logger : public logger
-{
-	public:
-		explicit file_logger(const char *file, const int level);
-		~file_logger();
-};
+	return dnet_addr_equal(&first.to_raw(), &second);
+}
 
 class node_data;
 class session_data;
@@ -158,24 +157,27 @@ class node
 	public:
 		node();
 		explicit node(const std::shared_ptr<node_data> &data);
-		explicit node(const logger &l);
-		node(const logger &l, dnet_config &cfg);
+		explicit node(logger &&l);
+		node(logger &&l, dnet_config &cfg);
 		node(const node &other);
 		~node();
 
+		static node from_raw(dnet_node *n);
+		static node from_raw(dnet_node *n, blackhole::log::attributes_t attributes);
+
 		node &operator =(const node &other);
 
-		void			add_remote(const std::string &addr, const int port, const int family = AF_INET);
-		void			add_remote(const char *addr, const int port, const int family = AF_INET);
-		void			add_remote(const std::string &addr);
-		void			add_remote(const char *addr);
+		bool			is_valid() const;
+
+		void			add_remote(const address &addr);
+		void			add_remote(const std::vector<address> &addrs);
 
 		void			set_timeouts(const int wait_timeout, const int check_timeout);
 
 		void			set_keepalive(int idle, int cnt, int interval);
 
-		logger get_log() const;
-		dnet_node *	get_native() const;
+		logger			&get_log() const;
+		dnet_node		*get_native() const;
 
 	protected:
 		std::shared_ptr<node_data> m_data;
@@ -210,15 +212,14 @@ class key
 
 		void transform(const session &sess) const;
 
-		void set_trace_id(trace_id_t trace_id) { m_trace_id = trace_id; }
-		trace_id_t get_trace_id() { return m_trace_id; }
-
 	private:
+		bool inited() const;
+		void set_inited(bool inited);
+
 		bool m_by_id;
 		std::string m_remote;
 		int m_reserved;
 		mutable dnet_id m_id;
-		trace_id_t m_trace_id;
 };
 
 class session
@@ -234,11 +235,13 @@ class session
 		};
 
 		explicit session(const node &n);
+		explicit session(dnet_node *node);
 		explicit session(const std::shared_ptr<session_data> &d);
 		session(const session &other);
 		virtual ~session();
 
 		session clone() const;
+		session clean_clone() const;
 
 		session &operator =(const session &other);
 
@@ -332,9 +335,8 @@ class session
 		/*!
 		 * Stick session to particular remote address.
 		 */
-		void			set_direct_id(const dnet_addr &remote_addr);
-		void			set_direct_id(const std::string &addr, int port, int family);
-		void			set_direct_id(const char *saddr, int port, int family);
+		void			set_direct_id(const address &remote_addr);
+		void			set_direct_id(const address &remote_addr, uint32_t backend_id);
 
 		/*!
 		 * Gets command flags of the session.
@@ -375,14 +377,17 @@ class session
 		/*!
 		 * Set/get transaction timeout
 		 */
-		void			set_timeout(unsigned int timeout);
+		void			set_timeout(long timeout);
 		long			get_timeout() const;
 
 		/*!
 		 * Sets/gets trace_id for all elliptics commands
 		 */
 		void			set_trace_id(trace_id_t trace_id);
-		trace_id_t get_trace_id();
+		trace_id_t		get_trace_id() const;
+
+		void			set_trace_bit(bool trace);
+		bool			get_trace_bit() const;
 
 		/*!
 		 * Read file by key \a id to \a file by \a offset and \a size.
@@ -570,11 +575,14 @@ class session
 		async_lookup_result lookup(const key &id);
 
 		/*!
-		 * Removes all the entries of key \a id at server nodes.
+		 * Lookups an information for the key \a id in parallel in all groups
+		 * You should use it in case of you need lookup_result_entry from more than one group
+		 * This method allows you to get lookup_result_entries almost simultaneously from all replicas
+		 * In fact time of work almost equals to time of the slowest group
 		 *
-		 * Returns async_remove_result.
+		 * Returns async_lookup_result.
 		 */
-		async_remove_result remove(const key &id);
+		async_lookup_result parallel_lookup(const key &id);
 
 		/*!
 		 * Removes all the entries of key \a original_id at server nodes.
@@ -584,33 +592,38 @@ class session
 		async_remove_result remove_by_original_id(const uint64_t &original_id);
 
 		/*!
-		 * Queries statistics information from the server nodes.
+		 * Lookups information for key \a id, picks lookup_result_enties by following rules:
+		 * 1. If there are quorum lookup_result_enties with the same timestamp, they are the final result
+		 * 2. Otherwise the final result is lookup_result_enties with the greatest timestamp
+		 * This method is a wrapper over parallel_lookup and usefull in case of you need to find
+		 * quorum identical replicas
 		 *
-		 * Returns async_stat_result.
+		 * Returns async_lookup_result.
 		 */
-		async_stat_result stat_log();
-		/*!
-		 * \overload stat_log()
-		 * Allows to specify the key \a id.
-		 */
-		async_stat_result stat_log(const key &id);
+		async_lookup_result quorum_lookup(const key &id);
 
 		/*!
-		 * Queries statistics information from the server nodes.
+		 * Removes all the entries of key \a id at server nodes.
 		 *
-		 * Returns async_stat_count_result.
+		 * Returns async_remove_result.
 		 */
-		async_stat_count_result stat_log_count();
+		async_remove_result remove(const key &id);
+
+		/*!
+		 * Removes vector of keys from all server nodes.
+		 * Returns async_remove_result.
+		 */
+		async_remove_result bulk_remove(const std::vector<key> &keys);
 
 		/*!
 		 * Queries monitor statistics information from server nodes.
 		 */
-		async_monitor_stat_result monitor_stat(int category);
+		async_monitor_stat_result monitor_stat(uint64_t categories);
 
 		/*!
 		 * Queries monitor statistics information from the server node specified by \a id
 		 */
-		async_monitor_stat_result monitor_stat(const key &id, int category);
+		async_monitor_stat_result monitor_stat(const address &addr, uint64_t categories);
 
 		/*!
 		 * Returns the number of session states.
@@ -618,21 +631,31 @@ class session
 		int			state_num();
 
 		/*!
-		 * Requests execution of custom command at server.
+		 * Requests execution of custom command at all backends of all server nodes.
 		 *
 		 * Returns async_genetic_result.
 		 */
 		async_generic_result request_cmd(const transport_control &ctl);
 
 		/*!
-		 * Changes node \a status on given \a address, \a port and network \a family.
+		 * Requests execution of custom command at single server.
+		 *
+		 * Returns async_genetic_result.
 		 */
-		void			update_status(const char *addr, const int port,
-						const int family, dnet_node_status *status);
+		async_generic_result request_single_cmd(const transport_control &ctl);
+
 		/*!
-		 * Changes node \a status on key \a id.
+		 * Changes node \a status on given \a address.
 		 */
-		void			update_status(const key &id, dnet_node_status *status);
+		void			update_status(const address &addr, dnet_node_status *status);
+
+		async_backend_control_result enable_backend(const address &addr, uint32_t backend_id);
+		async_backend_control_result disable_backend(const address &addr, uint32_t backend_id);
+		async_backend_control_result start_defrag(const address &addr, uint32_t backend_id);
+		async_backend_control_result set_backend_ids(const address &addr, uint32_t backend_id, const std::vector<dnet_raw_id> &ids);
+		async_backend_control_result make_readonly(const address &addr, uint32_t backend_id);
+		async_backend_control_result make_writable(const address &addr, uint32_t backend_id);
+		async_backend_status_result request_backends_status(const address &addr);
 
 		/*!
 		 * Reads data in range specified in \a io at group \a group_id.
@@ -640,15 +663,6 @@ class session
 		 * Returns async_read_result.
 		 */
 		async_read_result read_data_range(const dnet_io_attr &io, int group_id);
-
-		/*!
-		 * \internal
-		 * \overload read_data_range()
-		 * Synchronous overload.
-		 *
-		 * \note This method is left only for compatibility.
-		 */
-		std::vector<std::string> read_data_range_raw(dnet_io_attr &io, int group_id);
 
 		/*!
 		 * Removes data in range specified in \a io at group \a group_id.
@@ -660,7 +674,7 @@ class session
 		/*!
 		 * Returns the list of network routes.
 		 */
-		std::vector<std::pair<dnet_id, dnet_addr> > get_routes();
+		std::vector<dnet_route_entry> get_routes();
 
 		async_iterator_result start_iterator(const key &id, const std::vector<dnet_iterator_range>& ranges,
 								uint32_t type, uint64_t flags,
@@ -719,15 +733,6 @@ class session
 		 * Result contains information if starter received the reply.
 		 */
 		async_reply_result reply(const exec_context &context, const argument_data &data, exec_context::final_state state);
-
-		/*!
-		 * Send reply back to blocked execution client
-		 *
-		 * \note Left only for compatibility reasons.
-		 */
-		void			reply(const sph &sph, const std::string &event,
-						const std::string &data,
-						const std::string &binary);
 
 		/*!
 		 * Reads all data from server nodes by the list \a ios.
@@ -876,13 +881,38 @@ class session
 		async_list_indexes_result list_indexes(const key &id);
 
 		/*!
+		 * \brief Merge index tables stored at \a id.
+		 *
+		 * Reads index tables from groups \a from, merges them and writes result to \a to.
+		 *
+		 * \attention This is low-level function which merges not \b index \a id, but merges
+		 * data which is stored at key \a id.
+		 */
+		async_write_result merge_indexes(const key &id, const std::vector<int> &from, const std::vector<int> &to);
+
+		/*!
+		 * \brief Recover \a index so it will be consistent in all groups.
+		 *
+		 * This method recover not only list of objects in index but also list
+		 * of indexes of all objects at this indexes.
+		 */
+		async_generic_result recover_index(const key &index);
+
+		/*!
+		 * \brief Retrieves metadata about each index \a index
+		 *
+		 * Returns async_get_index_metadata_result.
+		 */
+		async_get_index_metadata_result get_index_metadata(const dnet_raw_id &index);
+		/*!
+		 * \overload
+		 */
+		async_get_index_metadata_result get_index_metadata(const std::string &index);
+
+		/*!
 		 * Returns logger object.
 		 */
-		logger get_logger() const;
-		/*!
-		 * Returns reference to parent node.
-		 */
-		node	get_node() const;
+		logger &get_logger() const;
 		/*!
 		 * Returns reference to parent node.
 		 */

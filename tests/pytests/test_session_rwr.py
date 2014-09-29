@@ -20,45 +20,47 @@ sys.path.insert(0, "")  # for running from cmake
 import pytest
 
 
-from conftest import simple_node
+from conftest import simple_node, make_session
 from server import server
 import elliptics
 
 
-def check_write_results(results, number, data):
+def check_write_results(results, number, data, session):
     assert len(results) == number
     for r in results:
         assert type(r) == elliptics.core.LookupResultEntry
         assert r.size == 48 + len(data)  # 48 is the size of data header
         assert r.error.code == 0
         assert r.error.message == ''
+        assert r.group_id in session.routes.get_address_groups(r.address)
 
 
-def checked_write(session, key, data):
+def checked_write(session, key, data,):
     results = session.write_data(key, data).get()
-    check_write_results(results, len(session.groups), data)
+    check_write_results(results, len(session.groups), data, session)
 
 
 def checked_bulk_write(session, datas, data):
     results = session.bulk_write(datas).get()
-    check_write_results(results, len(session.groups) * len(datas), data)
+    check_write_results(results, len(session.groups) * len(datas), data, session)
 
 
-def check_read_results(results, number, data):
+def check_read_results(results, number, data, session):
     assert len(results) == number
     assert type(results[0]) == elliptics.core.ReadResultEntry
     assert results[0].data == data
+    assert results[0].group_id in session.routes.get_address_groups(results[0].address)
     return results
 
 
 def checked_read(session, key, data):
     results = session.read_data(key).get()
-    check_read_results(results, 1, data)
+    check_read_results(results, 1, data, session)
 
 
 def checked_bulk_read(session, keys, data):
     results = session.bulk_read(keys).get()
-    check_read_results(results, len(keys), data)
+    check_read_results(results, len(keys), data, session)
 
 
 class TestSession:
@@ -69,13 +71,14 @@ class TestSession:
                              ('without_group_key_2', 'data'),
                              ("without_group_key_3", '309u8ryeygwvfgadd0u9g8y0ahbg8')])
     def test_write_without_groups(self, server, simple_node, key, data):
-        session = elliptics.Session(simple_node)
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_without_groups')
         result = session.write_data(key, data)
         try:
             result.get()
         except elliptics.Error as e:
             assert e.message.message == 'insufficient results count due to'\
-                ' checker: 0 of 0 (0): No such device or address: -6'
+                ' checker: 0 of 1 (1): No such device or address: -6'
         else:
             pytest.fail('Failed: DID NOT RAISE')
 
@@ -88,8 +91,10 @@ class TestSession:
                               None)])
     def test_write_to_all_groups(self, server, simple_node,
                                  key, data, exception):
-        session = elliptics.Session(simple_node)
-        session.groups = session.routes.groups()
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_to_all_groups')
+        groups = session.routes.groups()
+        session.groups = groups
 
         if exception:
             with pytest.raises(exception):
@@ -99,14 +104,14 @@ class TestSession:
 
     def test_write_to_one_group(self, server, simple_node):
         data = 'some data'
-
-        session = elliptics.Session(simple_node)
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_to_one_group')
         for group in session.routes.groups():
             tmp_key = 'one_groups_key_' + str(group)
             session.groups = [group]
             checked_write(session, tmp_key, data)
 
-            other_groups = session.routes.groups()
+            other_groups = list(session.routes.groups())
             other_groups.remove(group)
             session.groups = other_groups
             with pytest.raises(elliptics.NotFoundError):
@@ -119,9 +124,11 @@ class TestSession:
         ns2 = 'namespace 2'
         data1 = 'some data 1'
         data2 = 'unique data 2'
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_namespace')
 
-        session = elliptics.Session(simple_node)
-        session.groups = session.routes.groups()
+        groups = session.routes.groups()
+        session.groups = groups
 
         session.set_namespace(ns1)
         checked_write(session, key, data1)
@@ -148,9 +155,10 @@ class TestSession:
         key2 = 'append_key_2'
         data1 = 'some data 1'
         data2 = 'some data 2'
-
-        session = elliptics.Session(simple_node)
-        session.groups = session.routes.groups()
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_append')
+        groups = session.routes.groups()
+        session.groups = groups
 
         session.ioflags = elliptics.io_flags.default
         checked_write(session, key1, data1)
@@ -167,8 +175,10 @@ class TestSession:
         checked_read(session, key2, data1 + data2)
 
     def test_bulk_write_read(self, server, simple_node):
-        session = elliptics.Session(simple_node)
-        session.groups = session.routes.groups()
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_bulk_write_read')
+        groups = session.routes.groups()
+        session.groups = groups
 
         data = 'data'
 
@@ -182,8 +192,10 @@ class TestSession:
         checked_bulk_read(session, keys, data)
 
     def test_write_cas(self, server, simple_node):
-        session = elliptics.Session(simple_node)
-        session.groups = session.routes.groups()
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_write_cas')
+        groups = session.routes.groups()
+        session.groups = groups
 
         key = 'cas key'
         data1 = 'data 1'
@@ -193,12 +205,47 @@ class TestSession:
         checked_read(session, key, data1)
 
         results = session.write_cas(key, data2, session.transform(data1)).get()
-        check_write_results(results, len(session.groups), data2)
+        check_write_results(results, len(session.groups), data2, session)
         checked_read(session, key, data2)
 
         results = session.write_cas(key, lambda x: '__' + x + '__').get()
-        check_write_results(results, len(session.groups), '__' + data2 + '__')
+        check_write_results(results, len(session.groups), '__' + data2 + '__', session)
         checked_read(session, key, '__' + data2 + '__')
 
     def test_prepare_write_commit(self, server, simple_node):
-        pass
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_prepare_write_commit')
+        session.groups = [session.routes.groups()[0]]
+
+        routes = session.routes.filter_by_groups(session.groups)
+        pos, records, addr, back = (0, 0, None, 0)
+
+        for id, address, backend in routes.get_unique_routes():
+            ranges = routes.get_address_backend_ranges(address, backend)
+            statistics = session.monitor_stat(address, elliptics.monitor_stat_categories.backend).get()[0].statistics
+            session._node._logger.log(elliptics.log_level.debug, "monitor: stat: {0}".format(statistics))
+            records_in_blob = statistics['backends']['{0}'.format(backend)]['backend']['config']['records_in_blob']
+
+            for i, (begin, end) in enumerate(ranges):
+                if int(str(end), 16) - int(str(begin), 16) > records_in_blob * 2:
+                    pos = int(str(begin), 16)
+                    records = records_in_blob * 2
+                    addr, back = address, backend
+
+        assert pos
+        assert records
+
+        for i in range(pos, pos + records):
+            r = session.write_data(elliptics.Id(format(i, 'x')), 'data').get()
+            assert len(r) == 1
+            assert r[0].address == addr
+
+        pos_id = elliptics.Id(format(i, 'x'))
+        prepare_size = 1<<10
+        data = 'a' + 'b' * (prepare_size - 2) + 'c'
+
+        session.write_prepare(pos_id, data[0], 0, 1<<10).get()
+        session.write_plain(pos_id, data[1:-1], 1).get()
+        session.write_commit(pos_id, data[-1], prepare_size - 1, prepare_size).get()
+
+        assert session.read_data(pos_id).get()[0].data == data

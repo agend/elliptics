@@ -33,17 +33,15 @@ node::node(const std::shared_ptr<node_data> &data) : m_data(data)
 {
 }
 
-node::node(const logger &l) : m_data(new node_data)
+node::node(logger &&l) : m_data(new node_data(std::move(l)))
 {
-	m_data->log = l;
-
 	struct dnet_config cfg;
 
 	memset(&cfg, 0, sizeof(cfg));
 
 	cfg.wait_timeout = 5;
 	cfg.check_timeout = 20;
-	cfg.log = m_data->log.get_native();
+	cfg.log = &m_data->log;
 
 	m_data->node_ptr = dnet_node_create(&cfg);
 	if (!m_data->node_ptr) {
@@ -51,11 +49,9 @@ node::node(const logger &l) : m_data(new node_data)
 	}
 }
 
-node::node(const logger &l, struct dnet_config &cfg) : m_data(new node_data)
+node::node(logger &&l, dnet_config &cfg) : m_data(new node_data(std::move(l)))
 {
-	m_data->log = l;
-
-	cfg.log = m_data->log.get_native();
+	cfg.log = &m_data->log;
 
 	m_data->node_ptr = dnet_node_create(&cfg);
 	if (!m_data->node_ptr) {
@@ -69,57 +65,57 @@ node::node(const node &other) : m_data(other.m_data)
 node::~node()
 {}
 
+node node::from_raw(dnet_node *n)
+{
+	return node::from_raw(n, blackhole::log::attributes_t());
+}
+
+node node::from_raw(dnet_node *n, blackhole::log::attributes_t attributes)
+{
+	node result;
+	logger log(*dnet_node_get_logger(n), std::move(attributes));
+
+	result.m_data = std::make_shared<node_data>(std::move(log));
+	result.m_data->destroy_node = false;
+	result.m_data->node_ptr = n;
+
+	return result;
+}
+
 node &node::operator =(const node &other)
 {
 	m_data = other.m_data;
 	return *this;
 }
 
-void node::add_remote(const std::string &addr, const int port, const int family)
+bool node::is_valid() const
 {
-	add_remote(addr.c_str(), port, family);
+	return !!m_data;
 }
 
-void node::add_remote(const char *addr, const int port, const int family)
+void node::add_remote(const address &addr)
 {
 	if (!m_data)
 		throw_error(-EINVAL, "Failed to add remote addr to null node");
 
-	int err;
-
-	err = dnet_add_state(m_data->node_ptr, addr, port, family, 0);
-	if (err) {
-		throw_error(err, "Failed to add remote addr %s:%d", addr, port);
+	int err = dnet_add_state(m_data->node_ptr, &addr.to_raw(), 1, 0);
+	if (err < 0) {
+		throw_error(err, "Failed to add remote addr %s", addr.to_string().c_str());
 	}
 }
 
-void node::add_remote(const char *addr)
-{
-	add_remote(std::string(addr));
-}
-
-void node::add_remote(const std::string &addr)
+void node::add_remote(const std::vector<address> &addrs)
 {
 	if (!m_data)
 		throw_error(-EINVAL, "Failed to add remote addr to null node");
 
-	int port, family;
+	static_assert(sizeof(address) == sizeof(dnet_addr), "size of address is not equal to size of dnet_addr");
 
-	/*
-	 * addr will be modified, so use this ugly hack
-	 */
-	std::vector<char> addr_tmp;
-	addr_tmp.reserve(addr.size() + 1);
-	addr_tmp.assign(addr.begin(), addr.end());
-	addr_tmp.push_back('\0');
-
-	int err = dnet_parse_addr(addr_tmp.data(), &port, &family);
-	if (err)
-		throw_error(err, "Failed to parse remote addr %s", addr.c_str());
-
-	err = dnet_add_state(m_data->node_ptr, addr_tmp.data(), port, family, 0);
-	if (err)
-		throw_error(err, "Failed to add remote addr %s", addr.c_str());
+	// It's safe to cast address to dnet_addr as their size are equal
+	int err = dnet_add_state(m_data->node_ptr, reinterpret_cast<const dnet_addr *>(addrs.data()), addrs.size(), 0);
+	if (err < 0) {
+		throw_error(err, "Failed to add remote %zd addrs", addrs.size());
+	}
 }
 
 void node::set_timeouts(const int wait_timeout, const int check_timeout)
@@ -134,9 +130,9 @@ void node::set_keepalive(int idle, int cnt, int interval)
 		dnet_set_keepalive(m_data->node_ptr, idle, cnt, interval);
 }
 
-logger node::get_log() const
+logger &node::get_log() const
 {
-	return m_data ? m_data->log : logger();
+	return m_data->log;
 }
 
 dnet_node *node::get_native() const

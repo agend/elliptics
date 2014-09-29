@@ -14,403 +14,213 @@
  * GNU Lesser General Public License for more details.
  */
 
-#define _XOPEN_SOURCE 600
-
 #include "callback_p.h"
-
-#include <errno.h>
-#include <sstream>
-#include <stdexcept>
+#include "../../library/elliptics.h"
 
 namespace ioremap { namespace elliptics {
 
-/*
- * This macroses should be used surrounding all entry::methods which work directly
- * with m_data or data() to ensure that meanfull exceptions are thrown
- */
-#define DNET_DATA_BEGIN() try { \
-	do {} while (false)
+namespace detail {
 
-#define DNET_DATA_END(SIZE) \
-	} catch (not_found_error &) { \
-		if (!is_valid()) { \
-			throw_error(-ENOENT, "entry::%s(): entry is null", __FUNCTION__); \
-		} else {\
-			dnet_cmd *cmd = command(); \
-			throw_error(-ENOENT, cmd->id, "entry::%s(): data.size is too small, expected: %zu, actual: %zu, status: %d", \
-				__FUNCTION__, size_t(SIZE), data().size(), cmd->status); \
-		} \
-		throw; \
-	} \
-	do {} while (false)
-
-callback_result_entry::callback_result_entry() : m_data(std::make_shared<callback_result_data>())
+class basic_handler
 {
+public:
+	static int handler(dnet_addr *addr, dnet_cmd *cmd, void *priv)
+	{
+		basic_handler *that = reinterpret_cast<basic_handler *>(priv);
+		if (that->handle(addr, cmd)) {
+			delete that;
+		}
+
+		return 0;
+	}
+
+	basic_handler(const elliptics::logger *logger, async_generic_result &result) :
+		m_logger(*logger),
+		m_handler(result), m_completed(0), m_total(0)
+	{
+	}
+
+	bool handle(dnet_addr *addr, dnet_cmd *cmd)
+	{
+		if (is_trans_destroyed(cmd)) {
+			return increment_completed();
+		}
+
+		BH_LOG(m_logger, cmd->status ? DNET_LOG_ERROR : DNET_LOG_NOTICE,
+			"%s: handled reply from: %s, cmd: %s, flags: %s, trans: %lld, status: %d, size: %lld, client: %d, last: %d",
+			dnet_dump_id(&cmd->id), addr ? dnet_server_convert_dnet_addr(addr) : "<unknown>", dnet_cmd_string(cmd->cmd),
+			dnet_flags_dump_cflags(cmd->flags), uint64_t(cmd->trans), int(cmd->status), uint64_t(cmd->size),
+			!(cmd->flags & DNET_FLAGS_REPLY), !(cmd->flags & DNET_FLAGS_MORE));
+
+		auto data = std::make_shared<callback_result_data>(addr, cmd);
+
+		if (cmd->status)
+			data->error = create_error(*cmd);
+
+		callback_result_entry entry(data);
+
+		if (cmd->cmd == DNET_CMD_EXEC && cmd->size > 0) {
+			data->context = exec_context::parse(entry.data(), &data->error);
+		}
+
+		m_handler.process(entry);
+
+		return false;
+	}
+
+	bool set_total(size_t total)
+	{
+		m_handler.set_total(total);
+		m_total = total + 1;
+		return increment_completed();
+	}
+
+private:
+	bool increment_completed()
+	{
+		if (++m_completed == m_total) {
+			m_handler.complete(error_info());
+			return true;
+		}
+
+		return false;
+	}
+
+	const elliptics::logger &m_logger;
+	async_result_handler<callback_result_entry> m_handler;
+	std::atomic_size_t m_completed;
+	std::atomic_size_t m_total;
+};
+
+} // namespace detail
+
+template <typename Method, typename T>
+async_generic_result send_impl(session &sess, T &control, Method method)
+{
+	scoped_trace_id guard(sess);
+	async_generic_result result(sess);
+
+	detail::basic_handler *handler = new detail::basic_handler(sess.get_native_node()->log, result);
+
+	control.complete = detail::basic_handler::handler;
+	control.priv = handler;
+
+	const size_t count = method(sess, control);
+
+	if (handler->set_total(count))
+		delete handler;
+
+	return result;
 }
 
-callback_result_entry::callback_result_entry(const callback_result_entry &other) : m_data(other.m_data)
+static size_t send_to_single_state_impl(session &sess, dnet_trans_control &ctl)
 {
+	dnet_trans_alloc_send(sess.get_native(), &ctl);
+	return 1;
 }
 
-callback_result_entry::callback_result_entry(const std::shared_ptr<callback_result_data> &data) : m_data(data)
+// Send request to specificly set state by id
+async_generic_result send_to_single_state(session &sess, const transport_control &control)
 {
+	dnet_trans_control writable_copy = control.get_native();
+	return send_impl(sess, writable_copy, send_to_single_state_impl);
 }
 
-callback_result_entry::~callback_result_entry()
+static size_t send_to_single_state_io_impl(session &sess, dnet_io_control &ctl)
 {
+	dnet_io_trans_alloc_send(sess.get_native(), &ctl);
+	return 1;
 }
 
-callback_result_entry &callback_result_entry::operator =(const callback_result_entry &other)
+async_generic_result send_to_single_state(session &sess, dnet_io_control &control)
 {
-	m_data = other.m_data;
-	return *this;
+	return send_impl(sess, control, send_to_single_state_io_impl);
 }
 
-bool callback_result_entry::is_valid() const
+static size_t send_to_each_backend_impl(session &sess, dnet_trans_control &ctl)
 {
-	return !m_data->data.empty();
+	return dnet_request_cmd(sess.get_native(), &ctl);
 }
 
-bool callback_result_entry::is_ack() const
+// Send request to each backend
+async_generic_result send_to_each_backend(session &sess, const transport_control &control)
 {
-	return status() == 0 && data().empty();
+	dnet_trans_control writable_copy = control.get_native();
+	return send_impl(sess, writable_copy, send_to_each_backend_impl);
 }
 
-int callback_result_entry::status() const
+static size_t send_to_each_node_impl(session &sess, dnet_trans_control &ctl)
 {
-	return command()->status;
+	dnet_node *node = sess.get_native_node();
+	dnet_session *native_sess = sess.get_native();
+	dnet_net_state *st;
+
+	ctl.cflags |= DNET_FLAGS_DIRECT;
+	size_t count = 0;
+
+	pthread_mutex_lock(&node->state_lock);
+	list_for_each_entry(st, &node->dht_state_list, node_entry) {
+		if (st == node->st)
+			continue;
+
+		dnet_trans_alloc_send_state(native_sess, st, &ctl);
+		++count;
+	}
+	pthread_mutex_unlock(&node->state_lock);
+
+	return count;
 }
 
-error_info callback_result_entry::error() const
+async_generic_result send_to_each_node(session &sess, const transport_control &control)
 {
-	return m_data->error;
+	dnet_trans_control writable_copy = control.get_native();
+	return send_impl(sess, writable_copy, send_to_each_node_impl);
 }
 
-data_pointer callback_result_entry::raw_data() const
+static size_t send_to_groups_impl(session &sess, dnet_trans_control &ctl)
 {
-	return m_data->data;
+	dnet_session *native = sess.get_native();
+	size_t counter = 0;
+
+	for (int i = 0; i < native->group_num; ++i) {
+		ctl.id.group_id = native->groups[i];
+		dnet_trans_alloc_send(native, &ctl);
+		++counter;
+	}
+
+	return counter;
 }
 
-struct dnet_addr *callback_result_entry::address() const
+// Send request to one state at each session's group
+async_generic_result send_to_groups(session &sess, const transport_control &control)
 {
-	DNET_DATA_BEGIN();
-	return m_data->data
-		.data<struct dnet_addr>();
-	DNET_DATA_END(0);
+	dnet_trans_control writable_copy = control.get_native();
+	return send_impl(sess, writable_copy, send_to_groups_impl);
 }
 
-struct dnet_cmd *callback_result_entry::command() const
+static size_t send_to_groups_io_impl(session &sess, dnet_io_control &ctl)
 {
-	DNET_DATA_BEGIN();
-	return m_data->data
-		.skip<struct dnet_addr>()
-		.data<struct dnet_cmd>();
-	DNET_DATA_END(0);
+	return dnet_trans_create_send_all(sess.get_native(), &ctl);
 }
 
-data_pointer callback_result_entry::data() const
+async_generic_result send_to_groups(session &sess, dnet_io_control &control)
 {
-	DNET_DATA_BEGIN();
-	return m_data->data
-		.skip<struct dnet_addr>()
-		.skip<struct dnet_cmd>();
-	DNET_DATA_END(0);
+	return send_impl(sess, control, send_to_groups_io_impl);
 }
 
-uint64_t callback_result_entry::size() const
+async_generic_result send_srw_command(session &sess, dnet_id *id, sph *srw_data)
 {
-	return (m_data->data.size() <= (sizeof(struct dnet_addr) + sizeof(struct dnet_cmd)))
-		? (0)
-		: (m_data->data.size() - (sizeof(struct dnet_addr) + sizeof(struct dnet_cmd)));
-}
+	scoped_trace_id guard(sess);
+	async_generic_result result(sess);
 
-read_result_entry::read_result_entry()
-{
-}
+	detail::basic_handler *handler = new detail::basic_handler(sess.get_native_node()->log, result);
 
-read_result_entry::read_result_entry(const read_result_entry &other) : callback_result_entry(other)
-{
-}
+	const size_t count = dnet_send_cmd(sess.get_native(), id, detail::basic_handler::handler, handler, srw_data);
 
-read_result_entry::~read_result_entry()
-{
-}
+	if (handler->set_total(count))
+		delete handler;
 
-read_result_entry &read_result_entry::operator =(const read_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-struct dnet_io_attr *read_result_entry::io_attribute() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.data<struct dnet_io_attr>();
-	DNET_DATA_END(sizeof(dnet_io_attr));
-}
-
-data_pointer read_result_entry::file() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.skip<struct dnet_io_attr>();
-	DNET_DATA_END(sizeof(dnet_io_attr));
-}
-
-lookup_result_entry::lookup_result_entry()
-{
-}
-
-lookup_result_entry::lookup_result_entry(const lookup_result_entry &other) : callback_result_entry(other)
-{
-}
-
-lookup_result_entry::~lookup_result_entry()
-{
-}
-
-lookup_result_entry &lookup_result_entry::operator =(const lookup_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-struct dnet_addr *lookup_result_entry::storage_address() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.data<struct dnet_addr>();
-	DNET_DATA_END(sizeof(dnet_addr));
-}
-
-struct dnet_file_info *lookup_result_entry::file_info() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.skip<struct dnet_addr>()
-		.data<struct dnet_file_info>();
-	DNET_DATA_END(sizeof(dnet_addr) + sizeof(dnet_file_info));
-}
-
-const char *lookup_result_entry::file_path() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.skip<struct dnet_addr>()
-		.skip<struct dnet_file_info>()
-		.data<char>();
-	DNET_DATA_END(sizeof(dnet_addr) + sizeof(dnet_file_info) + sizeof(char));
-}
-
-stat_result_entry::stat_result_entry()
-{
-}
-
-stat_result_entry::stat_result_entry(const stat_result_entry &other) : callback_result_entry(other)
-{
-}
-
-stat_result_entry::~stat_result_entry()
-{
-}
-
-stat_result_entry &stat_result_entry::operator =(const stat_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-dnet_stat *stat_result_entry::statistics() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.data<struct dnet_stat>();
-	DNET_DATA_END(sizeof(dnet_stat));
-}
-
-stat_count_result_entry::stat_count_result_entry()
-{
-}
-
-stat_count_result_entry::stat_count_result_entry(const stat_count_result_entry &other) : callback_result_entry(other)
-{
-}
-
-stat_count_result_entry::~stat_count_result_entry()
-{
-}
-
-stat_count_result_entry &stat_count_result_entry::operator =(const stat_count_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-struct dnet_addr_stat *stat_count_result_entry::statistics() const
-{
-	DNET_DATA_BEGIN();
-	return data()
-		.data<struct dnet_addr_stat>();
-	DNET_DATA_END(sizeof(dnet_addr_stat));
-}
-
-monitor_stat_result_entry::monitor_stat_result_entry()
-{}
-
-monitor_stat_result_entry::monitor_stat_result_entry(const monitor_stat_result_entry &other)
-: callback_result_entry(other)
-{}
-
-monitor_stat_result_entry::~monitor_stat_result_entry()
-{}
-
-monitor_stat_result_entry &monitor_stat_result_entry::operator =(const monitor_stat_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-std::string monitor_stat_result_entry::statistics() const
-{
-	DNET_DATA_BEGIN();
-	return data().to_string();
-	DNET_DATA_END(0);
-}
-
-exec_result_entry::exec_result_entry()
-{
-}
-
-exec_result_entry::exec_result_entry(const std::shared_ptr<callback_result_data> &data)
-	: callback_result_entry(data)
-{
-}
-
-exec_result_entry::exec_result_entry(const exec_result_entry &other) : callback_result_entry(other)
-{
-}
-
-exec_result_entry::~exec_result_entry()
-{
-}
-
-exec_result_entry &exec_result_entry::operator =(const exec_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-exec_context exec_result_entry::context() const
-{
-	if (m_data->error)
-		m_data->error.throw_error();
-	return m_data->context;
-}
-
-iterator_result_entry::iterator_result_entry()
-{
-}
-
-iterator_result_entry::iterator_result_entry(const iterator_result_entry &other) : callback_result_entry(other)
-{
-}
-
-iterator_result_entry::~iterator_result_entry()
-{
-}
-
-iterator_result_entry &iterator_result_entry::operator =(const iterator_result_entry &other)
-{
-	callback_result_entry::operator =(other);
-	return *this;
-}
-
-dnet_iterator_response *iterator_result_entry::reply() const
-{
-	return data<dnet_iterator_response>();
-}
-
-uint64_t iterator_result_entry::id() const
-{
-	return reply()->id;
-}
-
-data_pointer iterator_result_entry::reply_data() const
-{
-	DNET_DATA_BEGIN();
-	return data().skip<dnet_iterator_response>();
-	DNET_DATA_END(sizeof(dnet_iterator_response));
-}
-
-//
-// Iterator container
-//
-
-//* Append one result to container
-void iterator_result_container::append(const iterator_result_entry &result)
-{
-	append(result.reply());
-}
-
-void iterator_result_container::append(const dnet_iterator_response *response)
-{
-	static const ssize_t resp_size = sizeof(dnet_iterator_response);
-	int err;
-
-	if (m_sorted)
-		throw_error(-EROFS, "can't append to already sorted container");
-
-	err = dnet_iterator_response_container_append(response, m_fd, m_write_position);
-	if (err != 0)
-		throw_error(err, "dnet_iterator_response_container_append() failed");
-	m_write_position += resp_size;
-	m_count++;
-}
-
-//* Sort container by (key, timestamp) tuple
-void iterator_result_container::sort()
-{
-	int err;
-
-	if (m_sorted == true)
-		return;
-
-	err = dnet_iterator_response_container_sort(m_fd, m_write_position);
-	if (err != 0)
-		throw_error(err, "sort failed");
-	m_sorted = true;
-}
-
-//* Compute diff between `this' and \a other, put it to \a result
-void iterator_result_container::diff(const iterator_result_container &other,
-		iterator_result_container &result) const
-{
-	int64_t err;
-
-	if (m_sorted == false || other.m_sorted == false)
-		throw_error(-EINVAL, "both containers must be sorted");
-
-	err = dnet_iterator_response_container_diff(result.m_fd, m_fd, m_write_position,
-			other.m_fd, other.m_write_position);
-	if (err < 0)
-		throw_error(err, "diff failed");
-
-	result.m_write_position = err;
-	result.m_count = result.m_write_position / sizeof(dnet_iterator_response);
-	result.m_sorted = true;
-}
-
-//* Extract n-th item from container
-dnet_iterator_response iterator_result_container::operator [](size_t n) const
-{
-	dnet_iterator_response response;
-	int err;
-
-	err = dnet_iterator_response_container_read(m_fd, n * sizeof(response), &response);
-	if (err != 0)
-		throw_error(err, "dnet_iterator_response_container_read failed");
-	return response;
+	return result;
 }
 
 } } // namespace ioremap::elliptics

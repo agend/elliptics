@@ -26,6 +26,7 @@ endif()
 add_library(test_common STATIC
     ../example/common.c
     ../example/config.cpp
+    ../example/config_impl.cpp
     ../example/file_backend.c
     ../example/backends.c
     ../example/eblob_backend.c
@@ -57,15 +58,19 @@ add_executable(dnet_cpp_capped_test capped_test.cpp)
 set_target_properties(dnet_cpp_capped_test ${TEST_PROPERTIES})
 target_link_libraries(dnet_cpp_capped_test ${TEST_LIBRARIES})
 
+add_executable(dnet_backends_test backends_test.cpp)
+set_target_properties(dnet_backends_test ${TEST_PROPERTIES})
+target_link_libraries(dnet_backends_test ${TEST_LIBRARIES})
 
-set(PYTESTS_FLAGS "")
+
+set(PYTESTS_FLAGS "-l" "-x" "--timeout=300" "--durations=10")
 if(NOT WITH_COCAINE)
     list(APPEND PYTESTS_FLAGS "--without-cocaine")
 endif()
 
 set(RUN_SERVERS_LIBRARIES ${TEST_LIBRARIES})
 
-set(TESTS_LIST dnet_cpp_test dnet_cpp_cache_test dnet_cpp_capped_test dnet_cpp_api_test)
+set(TESTS_LIST dnet_cpp_test dnet_cpp_cache_test dnet_cpp_capped_test dnet_backends_test dnet_cpp_api_test)
 set(TESTS_DEPS ${TESTS_LIST})
 
 if(WITH_COCAINE)
@@ -91,6 +96,8 @@ endif()
 add_executable(dnet_run_servers run_servers.cpp)
 target_link_libraries(dnet_run_servers ${RUN_SERVERS_LIBRARIES})
 
+list(APPEND TESTS_DEPS dnet_run_servers)
+
 add_custom_target(test
     COMMAND ${TEST_ENV} "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_tests.py" "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}" ${TESTS_LIST}
     DEPENDS ${TESTS_DEPS}
@@ -99,10 +106,12 @@ add_custom_target(test
 add_custom_command(TARGET test
     POST_BUILD
     COMMAND mkdir -p ${CMAKE_CURRENT_BINARY_DIR}/pytests/elliptics
+    COMMAND mkdir -p ${CMAKE_CURRENT_BINARY_DIR}/pytests/elliptics_recovery
     COMMAND cp ${CMAKE_CURRENT_BINARY_DIR}/../bindings/python/core.so* pytests/elliptics/
     COMMAND cp ${CMAKE_CURRENT_BINARY_DIR}/../bindings/cpp/libelliptics_cpp.so* pytests/
     COMMAND cp ${CMAKE_CURRENT_BINARY_DIR}/../*/libelliptics*.so* pytests/
     COMMAND cp ${CMAKE_SOURCE_DIR}/bindings/python/src/* pytests/elliptics/
+    COMMAND cp -r ${CMAKE_SOURCE_DIR}/recovery/elliptics_recovery/* pytests/elliptics_recovery/
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 add_custom_command(TARGET test
@@ -110,8 +119,9 @@ add_custom_command(TARGET test
     COMMAND virtualenv -p "${PYTHON_EXECUTABLE}" . &&
         . bin/activate &&
         pip install pytest &&
+        pip install pytest-timeout &&
         export LD_LIBRARY_PATH=.:.. &&
-        ${TEST_ENV} py.test ${CMAKE_CURRENT_SOURCE_DIR}/pytests ${PYTESTS_FLAGS}
+        ${TEST_ENV} py.test ${PYTESTS_FLAGS} ${CMAKE_CURRENT_SOURCE_DIR}/pytests
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/pytests)
 
 add_executable(dnet_cpp_indexes_test indexes-test.cpp)

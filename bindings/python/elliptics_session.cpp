@@ -42,9 +42,14 @@ namespace ioremap { namespace elliptics { namespace python {
 
 enum elliptics_filters {
 	elliptics_filters_positive = 0,
+	elliptics_filters_positive_with_ack,
+	elliptics_filters_positive_final,
 	elliptics_filters_negative,
+	elliptics_filters_negative_with_ack,
+	elliptics_filters_negative_final,
 	elliptics_filters_all,
 	elliptics_filters_all_with_ack,
+	elliptics_filters_all_final,
 };
 
 enum elliptics_checkers {
@@ -55,13 +60,18 @@ enum elliptics_checkers {
 };
 
 enum elliptics_monitor_categories {
-	elliptics_monitor_categories_all = DNET_MONITOR_ALL,
 	elliptics_monitor_categories_cache = DNET_MONITOR_CACHE,
 	elliptics_monitor_categories_io = DNET_MONITOR_IO,
 	elliptics_monitor_categories_commands = DNET_MONITOR_COMMANDS,
-	elliptics_monitor_categories_io_histograms = DNET_MONITOR_IO_HISTOGRAMS,
 	elliptics_monitor_categories_backend = DNET_MONITOR_BACKEND,
-	elliptics_monitor_categories_call_tree = DNET_MONITOR_CALL_TREE
+	elliptics_monitor_categories_call_tree = DNET_MONITOR_CALL_TREE,
+	elliptics_monitor_categories_procfs = DNET_MONITOR_PROCFS,
+	elliptics_monitor_categories_all = DNET_MONITOR_CACHE |
+	                                   DNET_MONITOR_IO |
+	                                   DNET_MONITOR_COMMANDS |
+	                                   DNET_MONITOR_BACKEND |
+	                                   DNET_MONITOR_CALL_TREE |
+	                                   DNET_MONITOR_PROCFS
 };
 
 struct write_cas_converter {
@@ -184,13 +194,17 @@ public:
 		session::set_groups(convert_to_vector<int>(groups));
 	}
 
-	void set_direct_id(std::string saddr, int port, int family) {
-		session::set_direct_id(saddr.c_str(), port, family);
+	void set_direct_id(std::string host, int port, int family, const bp::api::object &backend_id) {
+		if (backend_id.ptr() != Py_None) {
+			bp::extract<uint32_t> get_backend(backend_id);
+			session::set_direct_id(address(host, port, family), get_backend());
+		} else {
+			session::set_direct_id(address(host, port, family));
+		}
 	}
 
 	struct elliptics_id get_direct_id() {
-		dnet_id id = session::get_direct_id();
-		return id;
+		return session::get_direct_id();
 	}
 
 	bp::list get_groups() {
@@ -230,17 +244,34 @@ public:
 	void set_filter(elliptics_filters filter) {
 		auto res = filters::positive;
 		switch (filter) {
-			case elliptics_filters_negative:
-				res = filters::negative;
-				break;
-			case elliptics_filters_all:
-				res = filters::all;
-				break;
-			case elliptics_filters_all_with_ack:
-				res = filters::all_with_ack;
-				break;
 			default:
-				break;
+			case elliptics_filters_positive:
+					res = filters::positive;
+					break;
+			case elliptics_filters_positive_with_ack:
+					res = filters::positive_with_ack;
+					break;
+			case elliptics_filters_positive_final:
+					res = filters::positive_final;
+					break;
+			case elliptics_filters_negative:
+					res = filters::negative;
+					break;
+			case elliptics_filters_negative_with_ack:
+					res = filters::negative_with_ack;
+					break;
+			case elliptics_filters_negative_final:
+					res = filters::negative_final;
+					break;
+			case elliptics_filters_all:
+					res = filters::all;
+					break;
+			case elliptics_filters_all_with_ack:
+					res = filters::all_with_ack;
+					break;
+			case elliptics_filters_all_final:
+					res = filters::all_final;
+					break;
 		}
 
 		session::set_filter(res);
@@ -399,17 +430,36 @@ public:
 		return create_result(std::move(session::lookup(transform(id).id())));
 	}
 
-	elliptics_status update_status(const bp::api::object &id, elliptics_status &status) {
-		session::update_status(transform(id).id(), &status);
+	elliptics_status update_status(const std::string &host, const int port,
+	                               const int family, elliptics_status &status) {
+		session::update_status(address(host, port, family), &status);
 		return status;
 	}
 
-	elliptics_status update_status_addr(const std::string &saddr, const int port,
-	                                    const int family, elliptics_status &status) {
-		py_allow_threads_scoped pythr;
-		session::update_status(saddr.c_str(), port, family, &status);
-		return status;
+	python_backend_status_result enable_backend(const std::string &host, int port, int family, uint32_t backend_id) {
+		return create_result(std::move(session::enable_backend(address(host, port, family), backend_id)));
 	}
+
+	python_backend_status_result disable_backend(const std::string &host, int port, int family, uint32_t backend_id) {
+		return create_result(std::move(session::disable_backend(address(host, port, family), backend_id)));
+	}
+
+	python_backend_status_result start_defrag(const std::string &host, int port, int family, uint32_t backend_id) {
+		return create_result(std::move(session::start_defrag(address(host, port, family), backend_id)));
+	}
+
+	python_backend_status_result request_backends_status(const std::string &host, int port, int family) {
+		return create_result(std::move(session::request_backends_status(address(host, port, family))));
+	}
+
+	python_backend_status_result make_readonly(const std::string &host, int port, int family, uint32_t backend_id) {
+		return create_result(std::move(session::make_readonly(address(host, port, family), backend_id)));
+	}
+
+	python_backend_status_result make_writable(const std::string &host, int port, int family, uint32_t backend_id) {
+		return create_result(std::move(session::make_writable(address(host, port, family), backend_id)));
+	}
+
 
 	python_read_result read_data_range(const elliptics_range &r) {
 		return create_result(std::move(session::read_data_range(r.io_attr(), r.group_id)));
@@ -420,19 +470,8 @@ public:
 	}
 
 	bp::list get_routes() {
-		bp::list res;
-
 		auto routes = session::get_routes();
-
-		for (auto it = routes.begin(), end = routes.end(); it != end; ++it) {
-			std::string(dnet_server_convert_dnet_addr(&(it->second)));
-
-			res.append(bp::make_tuple(elliptics_id(it->first),
-			                          std::string(dnet_server_convert_dnet_addr(&(it->second)))
-			                          ));
-		}
-
-		return res;
+		return convert_to_list(routes);
 	}
 
 	python_iterator_result start_iterator(const bp::api::object &id, const bp::api::object &ranges,
@@ -456,7 +495,7 @@ public:
 		return create_result(std::move(session::cancel_iterator(transform(id).id(), iterator_id)));
 	}
 
-	python_exec_result exec(const bp::api::object &id, const bp::api::object &context, const int src_key, const std::string &event, const bp::api::object &data) {
+	python_exec_result exec(const bp::api::object &id_or_context, const std::string &event, const bp::api::object &data, const int src_key) {
 		dnet_id* raw_id = NULL;
 		dnet_id conv_id;
 
@@ -466,14 +505,14 @@ public:
 			str_data = get_data();
 		}
 
-		if (context.ptr() != Py_None) {
-			bp::extract<exec_context> get_context(context);
-			return create_result(std::move(session::exec(get_context(), event, data_pointer::copy(str_data))));
-		}
-
-		if (id.ptr() != Py_None) {
-			conv_id = transform(id).id();
-			raw_id = &conv_id;
+		if (id_or_context.ptr() != Py_None) {
+			bp::extract<exec_context> get_context(id_or_context);
+			if (get_context.check()) {
+				return create_result(std::move(session::exec(get_context(), event, data_pointer::copy(str_data))));
+			} else {
+				conv_id = transform(id_or_context).id();
+				raw_id = &conv_id;
+			}
 		}
 
 		return create_result(std::move(session::exec(raw_id, src_key, event, data_pointer::copy(str_data))));
@@ -633,6 +672,16 @@ public:
 		return create_result(std::move(session::list_indexes(transform(id).raw_id())));
 	}
 
+	python_write_result merge_indexes(const bp::api::object &id, const bp::api::object &from, const bp::api::object &to) {
+		auto std_from = convert_to_vector<int>(from);
+		auto std_to = convert_to_vector<int>(to);
+		return create_result(std::move(session::merge_indexes(transform(id).raw_id(), std_from, std_to)));
+	}
+
+	python_callback_result recover_index(const bp::api::object &index) {
+		return create_result(std::move(session::recover_index(transform(index).raw_id())));
+	}
+
 	python_callback_result remove_indexes(const bp::api::object &id, const bp::api::object &indexes) {
 		auto std_indexes = convert_to_vector<std::string>(indexes);
 
@@ -653,23 +702,18 @@ public:
 		return create_result(std::move(session::remove_index_internal(transform(id).raw_id())));
 	}
 
-	python_stat_result stat_log() {
-		return create_result(std::move(session::stat_log()));
-	}
+	python_monitor_stat_result monitor_stat(const bp::tuple &addr, uint64_t categories) {
+		if (bp::len(addr) == 0)
+			return create_result(std::move(session::monitor_stat(categories)));
 
-	python_stat_result stat_log_id(const bp::api::object &id) {
-		return create_result(std::move(session::stat_log(transform(id).id())));
-	}
+		bp::extract<std::string> get_host(addr[0]);
+		bp::extract<int> get_port(addr[1]);
+		bp::extract<int> get_family(addr[2]);
 
-	python_monitor_stat_result monitor_stat(const bp::api::object &id, int category) {
-		if (id.ptr() == Py_None)
-			return create_result(std::move(session::monitor_stat(category)));
-
-		return create_result(std::move(session::monitor_stat(transform(id).id(), category)));
-	}
-
-	python_stat_count_result stat_log_count() {
-		return create_result(std::move(session::stat_log_count()));
+		return create_result(std::move(session::monitor_stat(address(get_host(),
+		                                                             get_port(),
+		                                                             get_family()),
+		                                                     categories)));
 	}
 
 private:
@@ -704,9 +748,14 @@ void init_elliptics_session() {
 	    "all\n    Doesn't apply any filter on replies\n"
 	    "all_with_ack\n    Filters replies with ack")
 		.value("positive", elliptics_filters_positive)
+		.value("positive_with_ack", elliptics_filters_positive_with_ack)
+		.value("positive_final", elliptics_filters_positive_final)
 		.value("negative", elliptics_filters_negative)
+		.value("negative_with_ack", elliptics_filters_negative_with_ack)
+		.value("negative_final", elliptics_filters_negative_final)
 		.value("all", elliptics_filters_all)
 		.value("all_with_ack", elliptics_filters_all_with_ack)
+		.value("all_final", elliptics_filters_all_final)
 	;
 
 	bp::enum_<elliptics_checkers>("checkers",
@@ -727,16 +776,15 @@ void init_elliptics_session() {
 		"cache\n    Category for cache statistics\n"
 		"io\n    Category for IO queue statistics\n"
 		"commands\n    Category for commands statistics\n"
-		"io_histograms\n    Category for IO hisograms statistics\n"
 		"backend\n    Category for backend statistics\n"
 		"call_tree\n    Category for react call tree statistics")
 		.value("all", elliptics_monitor_categories_all)
 		.value("cache", elliptics_monitor_categories_cache)
 		.value("io", elliptics_monitor_categories_io)
 		.value("commands", elliptics_monitor_categories_commands)
-		.value("io_histograms", elliptics_monitor_categories_io_histograms)
 		.value("backend", elliptics_monitor_categories_backend)
 		.value("call_tree", elliptics_monitor_categories_call_tree)
+		.value("procfs", elliptics_monitor_categories_procfs)
 	;
 
 	bp::enum_<exec_context::final_state>("exec_context_final_states",
@@ -808,11 +856,9 @@ void init_elliptics_session() {
 		              &elliptics_session::set_trace_id,
 		    "Sets debug trace_id which will be printed in all logs\n"
 		    "connected with operations executed by the sesssion.\n"
-		    "If trace_id includes elliptics.trace_bit\n"
 		    "All logs connected with operations executed by the session\n"
 		    "will be printed with ignoring current log level\n\n"
-		    "session.trace_id = 123456\n"
-		    "session.trace_id = 123456 | elliptics.trace_bit")
+		    "session.trace_id = 123456")
 
 		.add_property("cflags",
 		              &elliptics_session::get_cflags,
@@ -833,10 +879,10 @@ void init_elliptics_session() {
 		.def("get_ioflags", &elliptics_session::get_ioflags)
 
 		.def("set_direct_id", &elliptics_session::set_direct_id,
-		     (bp::arg("addr"), bp::arg("port"), bp::arg("family") = 2),
-		    "set_direct_id(addr, port, family)\n"
-		    "    Makes elliptics.Session works with only specified node directly\n\n"
-		    "    session.set_direct_id(addr='host.com', port = 1025, family=2)")
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family") = 2, bp::arg("backend_id")=bp::api::object()),
+		    "set_direct_id(host, port, family=2, backend_id=None)\n"
+		    "    Makes elliptics.Session works with only specified backend directly\n\n"
+		    "    session.set_direct_id(host='host.com', port = 1025, family=2, backend_id=5)")
 
 		.def("get_direct_id", &elliptics_session::get_direct_id,
 		    "get_direct_id()\n"
@@ -883,8 +929,8 @@ void init_elliptics_session() {
 		.def("set_timeout", &elliptics_session::set_timeout)
 		.def("get_timeout", &elliptics_session::get_timeout)
 
-		.def("get_routes", &elliptics_session::get_routes,
-		     "get_routes()\n"
+		.add_property("routes", &elliptics_session::get_routes,
+		     "routes\n"
 		     "    Returns current routes table\n\n"
 		     "    routes = session.routes")
 
@@ -1302,24 +1348,57 @@ void init_elliptics_session() {
 		    "        print 'filepath:', write_result.filepath\n")
 
 		.def("update_status", &elliptics_session::update_status,
-		     (bp::arg("id"), bp::arg("status")),
-		    "update_status(id, status)\n"
-		    "    Updates status of node specified by id to status.\n\n"
-		    "    id = session.routes.get_address_id(Address.from_host_port('host.com:1025'))\n"
-		    "    new_status = elliptics.SessionStatus()\n"
-		    "    new_status.nflags = elliptics.status_flags.change\n"
-		    "    new_status.log_level = elliptics.log_level.error\n"
-		    "    session.update_status(id, new_status)")
-
-		.def("update_status", &elliptics_session::update_status_addr,
-		     (bp::arg("addr"), bp::arg("port"),
+		     (bp::arg("host"), bp::arg("port"),
 		      bp::arg("family"), bp::arg("status")),
 		    "update_status(addr, port, family, status)\n"
 		    "    Updates status of node specified by address to status.\n\n"
 		    "    new_status = elliptics.SessionStatus()\n"
 		    "    new_status.nflags = elliptics.status_flags.change\n"
 		    "    new_status.log_level = elliptics.log_level.error\n"
-		    "    session.update_status(Address.from_host_port('host.com:1025'), new_status)")
+		    "    session.update_status(host='host.com', port=1025, family=AF_INET, new_status)")
+
+		.def("enable_backend", &elliptics_session::enable_backend,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family"), bp::arg("backend_id")),
+		     "enable_backend(host, port, family, backend_id)\n"
+		     "    Enables backend @backend_id at node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides new status of the backend\n\n"
+		     "    new_status = session.enable_backend(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET), 0).get()[0].backends[0]")
+
+		.def("disable_backend", &elliptics_session::disable_backend,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family"), bp::arg("backend_id")),
+		     "disable_backend(host, port, family, backend_id)\n"
+		     "    Disables backend @backend_id at node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides new status of the backend\n\n"
+		     "    new_status = session.disable_backend(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET), 0).get()[0].backends[0]")
+
+		.def("start_defrag", &elliptics_session::start_defrag,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family"), bp::arg("backend_id")),
+		     "start_defrag(host, port, family, backend_id)\n"
+		     "    Start defragmentation of backend @backend_id at node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides new status of the backend\n\n"
+		     "    new_status = session.start_defrag(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET), 0).get()[0].backends[0]\n"
+		     "    defrag_state = new_state.defrag_state")
+
+		.def("request_backends_status", &elliptics_session::request_backends_status,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family")),
+		     "request_backends_status(host, port, family)\n"
+		     "    Request all backends status from node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides backends statuses\n\n"
+		     "    backends_statuses = session.request_backends_status(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET)).get()[0].backends")
+
+		.def("make_readonly", &elliptics_session::make_readonly,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family"), bp::arg("backend_id")),
+		     "make_readonly(host, port, family, backend_id)\n"
+		     "    Makes backend with @backend_id read-only at node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides new status of the backend\n\n"
+		     "    backends_statuses = session.make_readonly(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET), 0).get()[0].backends")
+
+		.def("make_writable", &elliptics_session::make_writable,
+		     (bp::arg("host"), bp::arg("port"), bp::arg("family"), bp::arg("backend_id")),
+		     "make_writable(host, port, family, backend_id)\n"
+		     "    Makes backend with @backend_id read-write-able at node addressed by @host, @port, @family\n"
+		     "    Returns AsyncResult which provides new status of the backend\n\n"
+		     "    backends_statuses = session.make_writable(elliptics.Address.from_host_port_family(host='host.com', port=1025, family=AF_INET), 0).get()[0].backends")
 
 // Remove operations
 
@@ -1634,6 +1713,21 @@ void init_elliptics_session() {
 		     "    excep Exception as e:\n"
 		     "        print 'List indexes failed:', e\n")
 
+		.def("merge_indexes", &elliptics_session::merge_indexes,
+		     (bp::args("id", "from", "to")),
+		     "merge_indexes(id, from, to)\n"
+		     "    Merges index tables stored at @id.\n"
+		     "    Reads index tables from groups @from, merges them and writes result to @to.\n\n"
+		     "    This is low-level function which merges not index @id, but merges\n"
+		     "    data which is stored at key @id\n")
+
+		.def("recover_index", &elliptics_session::recover_index,
+		     (bp::args("index")),
+		     "recover_index(index)\n"
+		     "    Recover @index consistency in all groups.\n"
+		     "    This method recovers not only list of objects in index but\n"
+		     "    also list of indexes of all objects at this indexes.\n")
+
 		.def("remove_indexes", &elliptics_session::remove_indexes,
 		     (bp::args("id", "indexes")),
 		     "remove_indexes(id, indexes)\n"
@@ -1657,80 +1751,12 @@ void init_elliptics_session() {
 
 // Statistics
 
-		.def("stat_log_count", &elliptics_session::stat_log_count,
-		    "stat_log_count()\n"
-		    "    Counters statistics of Elliptics node. Returns elliptics.AsyncResult.\n\n"
-		    "    result = session.stat_log_count()\n"
-		    "    stats = result.get()\n"
-		    "    for stat in stats:\n"
-		    "        print 'Address:', stat.address\n"
-		    "        print 'Counters:', stat.statistics.counters\n")
-
-		.def("stat_log", &elliptics_session::stat_log,
-		    "stat_log()\n"
-		    "    Provides statistics about virtual memory and file system utilization. Returns elliptics.AsyncResult\n\n"
-		    "    result = session.stat_log()\n"
-		    "    stats = result.get()\n"
-		    "    for stat in stats:\n"
-		    "        print 'Address:', stat.address\n"
-		    "        print 'la:', stat.statistics.la\n"
-		    "        print 'bsize:', stat.statistics.bsize\n"
-		    "        print 'frsize:', stat.statistics.frsize\n"
-		    "        print 'blocks:', stat.statistics.blocks\n"
-		    "        print 'bfree:', stat.statistics.bfree\n"
-		    "        print 'bavail:', stat.statistics.bavail\n"
-		    "        print 'files:', stat.statistics.files\n"
-		    "        print 'ffree:', stat.statistics.ffree\n"
-		    "        print 'favail:', stat.statistics.favail\n"
-		    "        print 'fsid:', stat.statistics.fsid\n"
-		    "        print 'flag:', stat.statistics.flag\n"
-		    "        print 'vm_active:', stat.statistics.vm_active\n"
-		    "        print 'vm_inactive:', stat.statistics.vm_inactive\n"
-		    "        print 'vm_total:', stat.statistics.vm_total\n"
-		    "        print 'vm_free:', stat.statistics.vm_free\n"
-		    "        print 'vm_cached:', stat.statistics.vm_cached\n"
-		    "        print 'vm_buffers:', stat.statistics.vm_buffers\n"
-		    "        print 'node_files:', stat.statistics.node_files\n"
-		    "        print 'node_files_removed:', stat.statistics.node_files_removed\n")
-
-		.def("stat_log", &elliptics_session::stat_log_id,
-		     (bp::arg("key")),
-		    "stat_log(key)\n"
-		    "    Provides statistics about virtual memory and file system utilization for the node speicified by @key.\n"
-		    "    Returns elliptics.AsyncResult\n"
-		    "    -- key - elliptics.Id which specifies node\n\n"
-		    "    id = session.routes.get_address_id(elliptics.Address.from_host_port('host.com:1025'))\n"
-		    "    result = session.stat_log(id)\n"
-		    "    stats = result.get()\n"
-		    "    for stat in stats:\n"
-		    "        print 'Address:', stat.address\n"
-		    "        print 'la:', stat.statistics.la\n"
-		    "        print 'bsize:', stat.statistics.bsize\n"
-		    "        print 'frsize:', stat.statistics.frsize\n"
-		    "        print 'blocks:', stat.statistics.blocks\n"
-		    "        print 'bfree:', stat.statistics.bfree\n"
-		    "        print 'bavail:', stat.statistics.bavail\n"
-		    "        print 'files:', stat.statistics.files\n"
-		    "        print 'ffree:', stat.statistics.ffree\n"
-		    "        print 'favail:', stat.statistics.favail\n"
-		    "        print 'fsid:', stat.statistics.fsid\n"
-		    "        print 'flag:', stat.statistics.flag\n"
-		    "        print 'vm_active:', stat.statistics.vm_active\n"
-		    "        print 'vm_inactive:', stat.statistics.vm_inactive\n"
-		    "        print 'vm_total:', stat.statistics.vm_total\n"
-		    "        print 'vm_free:', stat.statistics.vm_free\n"
-		    "        print 'vm_cached:', stat.statistics.vm_cached\n"
-		    "        print 'vm_buffers:', stat.statistics.vm_buffers\n"
-		    "        print 'node_files:', stat.statistics.node_files\n"
-		    "        print 'node_files_removed:', stat.statistics.node_files_removed\n")
-
 		.def("monitor_stat", &elliptics_session::monitor_stat,
-		     (bp::arg("key")="", bp::arg("category")=0),
-		    "monitor_stat(key=None, category=elliptics.monitor_stat_categories.all)\n"
-		    "    Gather monitor statistics of specified category.\n"
-		    "    -- key - elliptics.Id which specifies node\n\n"
-		    "    id = session.routes.get_address_id(elliptics.Address.from_host_port('host.com:1025'))\n"
-		    "    result = session.monitor_stat(id)\n"
+		     (bp::arg("address"), bp::arg("categories")=elliptics_monitor_categories_all),
+		    "monitor_stat(key=None, categories=elliptics.monitor_stat_categories.all)\n"
+		    "    Gather monitor statistics of specified categories.\n"
+		    "    -- address - elliptics.Address of node\n\n"
+		    "    result = session.monitor_stat(elliptics.Address.from_host_port('host.com:1025'))\n"
 		    "    stats = result.get()\n")
 
 		.def("state_num", &session::state_num)
@@ -1738,11 +1764,11 @@ void init_elliptics_session() {
 		// Couldn't use "exec" as a method name because it's a reserved keyword in python
 
 		.def("exec_", &elliptics_session::exec,
-		    (bp::arg("id")=bp::api::object(), bp::arg("context")=bp::api::object(), bp::arg("src_key") = -1, bp::arg("event"), bp::arg("data") = ""),
-		    "exec_(id=None, context=None, src_key=-1, event, data)\n"
+		    (bp::arg("id_or_context")=bp::api::object(), bp::arg("event"), bp::arg("data") = "", bp::arg("src_key") = -1),
+		    "exec_(id_or_context=None, event, data="", src_key=-1)\n"
 		    "    Sends execution request of the given @event and @data\n"
-		    "     to the party specified by a given @context or @id.\n"
-		    "     If both @id and @context are None then request will be sended to all nodes.\n"
+		    "     to the party specified by a given @id_or_context.\n"
+		    "     If @id_or_context is None then request will be sended to all nodes.\n"
 		    "     Returns async_exec_result.\n"
 		    "     Result contains all replies sent by nodes processing this event.\n")
 		.def("push", &elliptics_session::push,

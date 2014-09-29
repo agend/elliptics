@@ -26,10 +26,19 @@
 
 namespace ioremap { namespace monitor {
 
-react_stat_provider::react_stat_provider() {
+react_stat_provider::react_stat_provider(uint32_t call_timeout)
+: m_call_timeout(call_timeout) {
 }
 
-std::string react_stat_provider::json() const {
+int64_t call_tree_time(const react::call_tree_t &tree) {
+	std::chrono::microseconds ts(tree.get_node_stop_time(tree.root) - tree.get_node_start_time(tree.root));
+	return std::chrono::duration_cast<std::chrono::seconds>(ts).count();
+}
+
+std::string react_stat_provider::json(uint64_t categories) const {
+	if (!(categories & DNET_MONITOR_CALL_TREE))
+		return std::string();
+
 	rapidjson::Document doc;
 	doc.SetObject();
 	auto &allocator = doc.GetAllocator();
@@ -38,6 +47,8 @@ std::string react_stat_provider::json() const {
 		std::lock_guard<std::mutex> guard(react_aggregator.mutex);
 		rapidjson::Value aggregator_value(rapidjson::kArrayType);
 		for (auto it = react_aggregator.recent_call_trees.begin(); it != react_aggregator.recent_call_trees.end(); ++it) {
+			if (call_tree_time(*it) < m_call_timeout)
+				continue;
 			rapidjson::Value tree_value(rapidjson::kObjectType);
 			(*it).to_json(tree_value, allocator);
 			aggregator_value.PushBack(tree_value, allocator);
@@ -49,10 +60,6 @@ std::string react_stat_provider::json() const {
 	rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
 	doc.Accept(writer);
 	return buffer.GetString();
-}
-
-bool react_stat_provider::check_category(int category) const {
-	return category == DNET_MONITOR_CALL_TREE || category == DNET_MONITOR_ALL;
 }
 
 react::elliptics_react_aggregator_t &react_stat_provider::get_react_aggregator() {

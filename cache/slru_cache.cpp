@@ -25,21 +25,27 @@ namespace ioremap { namespace cache {
 
 // public:
 
-slru_cache_t::slru_cache_t(struct dnet_node *n, const std::vector<size_t> &cache_pages_max_sizes) :
+slru_cache_t::slru_cache_t(struct dnet_backend_io *backend, struct dnet_node *n,
+	const std::vector<size_t> &cache_pages_max_sizes, unsigned sync_timeout) :
+	m_backend(backend),
 	m_node(n),
 	m_cache_pages_number(cache_pages_max_sizes.size()),
 	m_cache_pages_max_sizes(cache_pages_max_sizes),
 	m_cache_pages_sizes(m_cache_pages_number, 0),
 	m_cache_pages_lru(new lru_list_t[m_cache_pages_number]),
-	m_clear_occured(false) {
+	m_clear_occured(false),
+	m_sync_timeout(sync_timeout) {
 	m_lifecheck = std::thread(std::bind(&slru_cache_t::life_check, this));
 }
 
 slru_cache_t::~slru_cache_t() {
 	react_start_action(ACTION_CACHE_DESTRUCT);
+	dnet_log(m_node, DNET_LOG_NOTICE, "cache: disable: backend: %zu: destructing SLRU cache\n", m_backend->backend_id);
 	m_lifecheck.join();
+	dnet_log(m_node, DNET_LOG_NOTICE, "cache: disable: backend: %zu: clearing\n", m_backend->backend_id);
 	clear();
 	react_stop_action(ACTION_CACHE_DESTRUCT);
+	dnet_log(m_node, DNET_LOG_NOTICE, "cache: disable: backend: %zu: destructed\n", m_backend->backend_id);
 }
 
 int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *cmd, dnet_io_attr *io, const char *data) {
@@ -61,7 +67,7 @@ int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *c
 	react_stop_action(ACTION_CACHE_FIND);
 
 	if (!it && !cache) {
-		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: not a cache call\n", dnet_dump_id_str(id));
+		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: not a cache call", dnet_dump_id_str(id));
 		return -ENOTSUP;
 	}
 
@@ -76,7 +82,7 @@ int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *c
 				new_page = true;
 				it->set_only_append(true);
 				size_t previous_eventtime = it->eventtime();
-				it->set_synctime(time(NULL) + m_node->cache_sync_timeout);
+				it->set_synctime(time(NULL) + m_sync_timeout);
 
 				if (previous_eventtime != it->eventtime()) {
 					react_start_action(ACTION_CACHE_DECREASE_KEY);
@@ -120,10 +126,10 @@ int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *c
 
 			sync_after_append(guard, false, &*it);
 
-			local_session sess(m_node);
+			local_session sess(m_backend, m_node);
 			sess.set_ioflags(DNET_IO_FLAGS_NOCACHE | DNET_IO_FLAGS_APPEND);
 
-			int err = m_node->cb->command_handler(st, m_node->cb->command_private, cmd, io);
+			int err = m_backend->cb->command_handler(st, m_backend->cb->command_private, cmd, io);
 
 			it = populate_from_disk(guard, id, false, &err);
 
@@ -164,13 +170,13 @@ int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *c
 			dnet_transform_node(m_node, raw.data().data(), raw.size(), csum.id, sizeof(csum.id));
 
 			if (memcmp(csum.id, io->parent, DNET_ID_SIZE)) {
-				dnet_log(m_node, DNET_LOG_ERROR, "%s: cas: cache checksum mismatch\n", dnet_dump_id(&cmd->id));
+				dnet_log(m_node, DNET_LOG_ERROR, "%s: cas: cache checksum mismatch", dnet_dump_id(&cmd->id));
 				return -EBADFD;
 			}
 		}
 	}
 
-	dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: CAS checked\n", dnet_dump_id_str(id));
+	dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: CAS checked", dnet_dump_id_str(id));
 
 	size_t new_data_size = 0;
 
@@ -215,7 +221,7 @@ int slru_cache_t::write(const unsigned char *id, dnet_net_state *st, dnet_cmd *c
 	size_t previous_eventtime = it->eventtime();
 
 	if (!it->synctime() && !(io->flags & DNET_IO_FLAGS_CACHE_ONLY)) {
-		it->set_synctime(time(NULL) + m_node->cache_sync_timeout);
+		it->set_synctime(time(NULL) + m_sync_timeout);
 	}
 
 	if (lifetime) {
@@ -332,7 +338,7 @@ int slru_cache_t::remove(const unsigned char *id, dnet_io_attr *io) {
 
 		react_start_action(ACTION_CACHE_REMOVE_LOCAL);
 
-		int local_err = dnet_remove_local(m_node, &raw);
+		int local_err = dnet_remove_local(m_backend, m_node, &raw);
 		if (local_err != -ENOENT)
 			err = local_err;
 
@@ -365,17 +371,25 @@ int slru_cache_t::lookup(const unsigned char *id, dnet_net_state *st, dnet_cmd *
 	guard.unlock();
 
 	react_start_action(ACTION_CACHE_LOCAL_LOOKUP);
-	local_session sess(m_node);
+
+	// go check object on disk
+	local_session sess(m_backend, m_node);
 	cmd->flags |= DNET_FLAGS_NOCACHE;
 	ioremap::elliptics::data_pointer data = sess.lookup(*cmd, &err);
 	cmd->flags &= ~DNET_FLAGS_NOCACHE;
+
 	react_stop_action(ACTION_CACHE_LOCAL_LOOKUP);
+
+	cmd->flags &= ~(DNET_FLAGS_MORE | DNET_FLAGS_NEED_ACK);
 
 	if (err) {
 		if (!it) {
+			// there is no object neither in cache nor on disk,
+			// we want client to notify about that, send him ACK
+			cmd->flags |= DNET_FLAGS_NEED_ACK;
 			return err;
 		}
-		cmd->flags &= ~DNET_FLAGS_NEED_ACK;
+
 		// zero size means 'we didn't find key on disk', but yet it exists in cache
 		// lookup by its nature is 'show me what is on disk' command
 		return dnet_send_file_info_ts_without_fd(st, cmd, NULL, 0, &timestamp);
@@ -386,7 +400,6 @@ int slru_cache_t::lookup(const unsigned char *id, dnet_net_state *st, dnet_cmd *
 		info->mtime = timestamp;
 	}
 
-	cmd->flags &= (DNET_FLAGS_MORE | DNET_FLAGS_NEED_ACK);
 	return dnet_send_reply(st, cmd, data.data(), data.size(), 0);
 }
 
@@ -463,9 +476,9 @@ void slru_cache_t::insert_data_into_page(const unsigned char *id, size_t page_nu
 
 	// Recalc used space, free enough space for new data, move object to the end of the queue
 	if (m_cache_pages_sizes[page_number] + size > m_cache_pages_max_sizes[page_number]) {
-		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: resize called: %lld ms\n", dnet_dump_id_str(id), timer.restart());
+		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: resize called: %lld ms", dnet_dump_id_str(id), timer.restart());
 		resize_page(id, page_number, size);
-		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: resize finished: %lld ms\n", dnet_dump_id_str(id), timer.restart());
+		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: resize finished: %lld ms", dnet_dump_id_str(id), timer.restart());
 	}
 
 	data->set_cache_page_number(page_number);
@@ -513,7 +526,7 @@ data_t* slru_cache_t::populate_from_disk(elliptics_unique_lock<std::mutex> &guar
 		guard.unlock();
 	}
 
-	local_session sess(m_node);
+	local_session sess(m_backend, m_node);
 	sess.set_ioflags(DNET_IO_FLAGS_NOCACHE);
 
 	dnet_id raw_id;
@@ -625,14 +638,14 @@ void slru_cache_t::erase_element(data_t *obj) {
 void slru_cache_t::sync_element(const dnet_id &raw, bool after_append, const std::vector<char> &data, uint64_t user_flags, const dnet_time &timestamp) {
 	react::action_guard sync_guard(ACTION_CACHE_SYNC);
 
-	local_session sess(m_node);
+	local_session sess(m_backend, m_node);
 	sess.set_ioflags(DNET_IO_FLAGS_NOCACHE | (after_append ? DNET_IO_FLAGS_APPEND : 0));
 
 	int err = sess.write(raw, data.data(), data.size(), user_flags, timestamp);
 	if (err) {
-		dnet_log(m_node, DNET_LOG_ERROR, "%s: CACHE: forced to sync to disk, err: %d\n", dnet_dump_id_str(raw.id), err);
+		dnet_log(m_node, DNET_LOG_ERROR, "%s: CACHE: forced to sync to disk, err: %d", dnet_dump_id_str(raw.id), err);
 	} else {
-		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: forced to sync to disk, err: %d\n", dnet_dump_id_str(raw.id), err);
+		dnet_log(m_node, DNET_LOG_DEBUG, "%s: CACHE: forced to sync to disk, err: %d", dnet_dump_id_str(raw.id), err);
 	}
 }
 
@@ -664,7 +677,7 @@ void slru_cache_t::sync_after_append(elliptics_unique_lock<std::mutex> &guard, b
 
 	guard.unlock();
 
-	local_session sess(m_node);
+	local_session sess(m_backend, m_node);
 	sess.set_ioflags(DNET_IO_FLAGS_NOCACHE | DNET_IO_FLAGS_APPEND);
 
 	auto &raw = raw_data->data();
@@ -683,7 +696,9 @@ void slru_cache_t::sync_after_append(elliptics_unique_lock<std::mutex> &guard, b
 
 void slru_cache_t::life_check(void) {
 
-	while (!dnet_need_exit(m_node)) {
+	dnet_set_name("dnet_cache_%zu", m_backend->backend_id);
+
+	while (!need_exit()) {
 		if (m_node->monitor) {
 			react_activate(m_node->react_aggregator);
 		}
@@ -702,7 +717,7 @@ void slru_cache_t::life_check(void) {
 				react_stop_action(ACTION_CACHE_LOCK);
 
 				react_start_action(ACTION_CACHE_PREPARE_SYNC);
-				while (!dnet_need_exit(m_node) && !m_treap.empty()) {
+				while (!need_exit() && !m_treap.empty()) {
 					size_t time = ::time(NULL);
 					last_time = time;
 
@@ -764,7 +779,7 @@ void slru_cache_t::life_check(void) {
 			react_stop_action(ACTION_CACHE_SYNC_ITERATE);
 			react_start_action(ACTION_CACHE_REMOVE_LOCAL);
 			for (std::deque<struct dnet_id>::iterator it = remove.begin(); it != remove.end(); ++it) {
-				dnet_remove_local(m_node, &(*it));
+				dnet_remove_local(m_backend, m_node, &(*it));
 			}
 			react_stop_action(ACTION_CACHE_REMOVE_LOCAL);
 

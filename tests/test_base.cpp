@@ -1,3 +1,5 @@
+#define TEST_DO_NOT_INCLUDE_PLACEHOLDERS
+
 #include "test_base.hpp"
 #include "../example/common.h"
 
@@ -207,7 +209,6 @@ server_config server_config::default_value()
 			("type", "blob")
 			("sync", 5)
 			("blob_flags", 6)
-			("iterate_thread_num", 1)
 			("blob_size", "10M")
 			("records_in_blob", 10000000)
 			("defrag_timeout", 3600)
@@ -271,23 +272,49 @@ struct json_value_visitor : public boost::static_visitor<>
 
 void server_config::write(const std::string &path)
 {
+	const std::string format = file_logger::format();
+
 	rapidjson::MemoryPoolAllocator<> allocator;
-	rapidjson::Value server;
-	server.SetObject();
+
+	rapidjson::Value formatter;
+	formatter.SetObject();
+	formatter.AddMember("type", "string", allocator);
+	formatter.AddMember("pattern", format.c_str(), allocator);
+
+	rapidjson::Value sink;
+	sink.SetObject();
+	sink.AddMember("type", "files", allocator);
+	sink.AddMember("path", log_path.c_str(), allocator);
+	sink.AddMember("autoflush", true, allocator);
+
+	rapidjson::Value frontend;
+	frontend.SetObject();
+	frontend.AddMember("formatter", formatter, allocator);
+	frontend.AddMember("sink", sink, allocator);
+
+	rapidjson::Value frontends;
+	frontends.SetArray();
+	frontends.PushBack(frontend, allocator);
+
+	rapidjson::Value log_level(file_logger::generate_level(DNET_LOG_DEBUG).c_str(), allocator);
 
 	rapidjson::Value logger;
 	logger.SetObject();
+	logger.AddMember("level", log_level, allocator);
+	logger.AddMember("frontends", frontends, allocator);
 
-	logger.AddMember("type", log_path.c_str(), allocator);
-	logger.AddMember("level", DNET_LOG_DEBUG, allocator);
-
-	server.AddMember("loggers", logger, allocator);
+	rapidjson::Value server;
+	server.SetObject();
+	server.AddMember("logger", logger, allocator);
 
 	rapidjson::Value options_json;
 	options_json.SetObject();
 
 	rapidjson::Value cache_json;
 	cache_json.SetNull();
+
+	rapidjson::Value monitor_json;
+	monitor_json.SetNull();
 
 	for (auto it = options.m_data.begin(); it != options.m_data.end(); ++it) {
 		rapidjson::Value *object = &options_json;
@@ -298,6 +325,11 @@ void server_config::write(const std::string &path)
 				cache_json.SetObject();
 			key = it->first.c_str() + 6;
 			object = &cache_json;
+		} else if (it->first.compare(0, 8, "monitor_") == 0) {
+			if (!monitor_json.IsObject())
+				monitor_json.SetObject();
+			key = it->first.c_str() + 8;
+			object = &monitor_json;
 		}
 
 		json_value_visitor visitor(key, object, &allocator);
@@ -305,6 +337,7 @@ void server_config::write(const std::string &path)
 	}
 
 	options_json.AddMember("cache", cache_json, allocator);
+	options_json.AddMember("monitor", monitor_json, allocator);
 	server.AddMember("options", options_json, allocator);
 
 	rapidjson::Value backends_json;
@@ -356,13 +389,13 @@ server_node::server_node() : m_node(NULL), m_monitor_port(0), m_fork(false), m_k
 {
 }
 
-server_node::server_node(const std::string &path, const std::string &remote, int monitor_port, bool fork)
-	: m_node(NULL), m_path(path), m_remote(remote), m_monitor_port(monitor_port), m_fork(fork), m_kill_sent(false), m_pid(0)
+server_node::server_node(const std::string &path, const server_config &config, const address &remote, int monitor_port, bool fork)
+	: m_node(NULL), m_path(path), m_config(config), m_remote(remote), m_monitor_port(monitor_port), m_fork(fork), m_kill_sent(false), m_pid(0)
 {
 }
 
 server_node::server_node(server_node &&other) :
-	m_node(other.m_node), m_path(std::move(other.m_path)), m_remote(std::move(other.m_remote)),
+	m_node(other.m_node), m_path(std::move(other.m_path)), m_config(std::move(other.m_config)), m_remote(std::move(other.m_remote)),
 	m_monitor_port(other.monitor_port()), m_fork(other.m_fork), m_kill_sent(other.m_kill_sent), m_pid(other.m_pid)
 {
 	other.m_node = NULL;
@@ -488,7 +521,17 @@ bool server_node::is_stopped() const
 	return true;
 }
 
-std::string server_node::remote() const
+std::string server_node::config_path() const
+{
+	return m_path;
+}
+
+server_config server_node::config() const
+{
+	return m_config;
+}
+
+address server_node::remote() const
 {
 	return m_remote;
 }
@@ -496,6 +539,11 @@ std::string server_node::remote() const
 int server_node::monitor_port() const
 {
 	return m_monitor_port;
+}
+
+pid_t server_node::pid() const
+{
+	return m_pid;
 }
 
 dnet_node *server_node::get_native()
@@ -521,7 +569,7 @@ static bool is_bindable(int port)
 	addr.addr_len = sizeof(addr.addr);
 	addr.family = family;
 
-	int err = dnet_fill_addr(&addr, "localhost", port, SOCK_STREAM, IPPROTO_TCP);
+	int err = dnet_fill_addr(&addr, "127.0.0.1", port, SOCK_STREAM, IPPROTO_TCP);
 
 	if (err) {
 		::close(s);
@@ -609,7 +657,7 @@ static std::vector<std::string> generate_ports(size_t count, std::set<std::strin
 
 static std::string create_remote(const std::string &port)
 {
-	return "localhost:" + port + ":2";
+	return "127.0.0.1:" + port + ":2";
 }
 
 typedef std::map<std::string, std::string> substitute_context;
@@ -695,7 +743,7 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 	for (size_t j = 0; j < configs.size(); ++j) {
 		if (j > 0)
 			cocaine_remotes += ", ";
-		cocaine_remotes += "\"localhost:" + ports[j] + ":2\"";
+		cocaine_remotes += "\"127.0.0.1:" + ports[j] + ":2\"";
 		for (auto it = configs[j].backends.begin(); it != configs[j].backends.end(); ++it) {
 			const std::string group = it->string_value("group");
 			if (cocaine_unique_groups.insert(group).second) {
@@ -714,13 +762,19 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 
 	for (size_t i = 0; i < configs.size(); ++i) {
 		debug_stream << "Starting server #" << (i + 1) << std::endl;
+		server_config config = configs[i];
 
 		const std::string server_suffix = "/server-" + boost::lexical_cast<std::string>(i + 1);
 		const std::string server_path = base_path + server_suffix;
 
 		create_directory(server_path);
-		create_directory(server_path + "/blob");
-		create_directory(server_path + "/history");
+
+		for (size_t j = 0; j < config.backends.size(); ++j) {
+			std::string prefix = server_path + "/" + boost::lexical_cast<std::string>(j);
+			create_directory(prefix);
+			create_directory(prefix + "/history");
+			create_directory(prefix + "/blob");
+		}
 
 		std::vector<std::string> remotes;
 		for (size_t j = 0; j < configs.size(); ++j) {
@@ -730,7 +784,6 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 			remotes.push_back(create_remote(ports[j]));
 		}
 
-		server_config config = configs[i];
 		if (!remotes.empty())
 			config.options("remote", remotes);
 
@@ -770,14 +823,21 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 				("monitor_port", boost::lexical_cast<int>(monitor_ports[i]))
 				;
 
-		config.backends[0]
-				("history", server_path + "/history")
-				("data", server_path + "/blob/data")
-				;
+		for (size_t i = 0; i < config.backends.size(); ++i) {
+			std::string prefix = server_path + "/" + boost::lexical_cast<std::string>(i);
+			config.backends[i]
+					("history", prefix + "/history")
+					("data", prefix + "/blob")
+					;
+
+			if (!config.backends[i].has_value("backend_id"))
+				config.backends[i]("backend_id", static_cast<int64_t>(i));
+		}
 
 		config.write(server_path + "/ioserv.conf");
 
 		server_node server(server_path + "/ioserv.conf",
+			config,
 			create_remote(ports[i]),
 			boost::lexical_cast<int>(monitor_ports[i]),
 			fork);
@@ -845,7 +905,7 @@ nodes_data::ptr start_nodes(std::ostream &debug_stream, const std::vector<server
 	try {
 		std::vector<std::string> remotes;
 		for (size_t i = 0; i < data->nodes.size(); ++i) {
-			remotes.push_back(data->nodes[i].remote());
+			remotes.push_back(data->nodes[i].remote().to_string_with_family());
 		}
 
 		start_client_nodes(data, debug_stream, remotes);
@@ -868,13 +928,13 @@ static void start_client_nodes(const nodes_data::ptr &data, std::ostream &debug_
 	dnet_config config;
 	memset(&config, 0, sizeof(config));
 
-	logger log;
+	data->logger.reset(new logger_base);
 	if (!data->directory.path().empty()) {
 		const std::string path = data->directory.path() + "/client.log";
-		log = file_logger(path.c_str(), DNET_LOG_DEBUG);
+		data->logger.reset(new file_logger(path.c_str(), DNET_LOG_DEBUG));
 	}
 
-	data->node.reset(new node(log));
+	data->node.reset(new node(logger(*data->logger, blackhole::log::attributes_t())));
 	for (size_t i = 0; i < remotes.size(); ++i) {
 		data->node->add_remote(remotes[i].c_str());
 	}

@@ -25,7 +25,9 @@ sys.path.insert(0, "")  # for running from cmake
 class Servers:
     def __init__(self,
                  groups=[1],
-                 without_cocaine=False):
+                 without_cocaine=False,
+                 nodes_count=3,
+                 backends_count=3):
         import json
         import subprocess
         self.path = 'servers'
@@ -39,9 +41,12 @@ class Servers:
         config['monitor'] = True
         config['path'] = self.path
         servers = []
-        for g in groups:
-            for i in xrange(3):
-                servers.append({'group': g})
+        for node in xrange(nodes_count):
+            backends = []
+            for g in groups:
+                for i in xrange(backends_count):
+                    backends.append({'group': g, 'records_in_blob': 100})
+            servers.append({'backends': backends})
         config['servers'] = servers
         js = json.dumps(config)
 
@@ -65,13 +70,10 @@ class Servers:
         self.remotes = [str(x['remote']) for x in self.config['servers']]
         self.monitors = [str(x['monitor']) for x in self.config['servers']]
 
-    def stop(self):
+    def stop(self, failed):
         if self.p and self.p.poll() is None:
             self.p.terminate()
             self.p.wait()
-
-        if os.path.exists(self.path):
-            shutil.rmtree(self.path)
 
 
 @pytest.fixture(scope='session')
@@ -82,14 +84,16 @@ def server(request):
     groups = [int(g) for g in request.config.option.groups.split(',')]
 
     servers = Servers(groups=groups,
-                      without_cocaine=request.config.option.without_cocaine,)
+                      without_cocaine=request.config.option.without_cocaine,
+                      nodes_count=int(request.config.option.nodes_count),
+                      backends_count=int(request.config.option.backends_count))
 
     request.config.option.remotes = servers.remotes
     request.config.option.monitors = servers.monitors
 
     def fin():
         print "Finilizing Servers"
-        servers.stop()
+        servers.stop(request.node.exitstatus != 0)
     request.addfinalizer(fin)
 
     return servers

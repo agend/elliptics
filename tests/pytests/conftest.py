@@ -26,10 +26,16 @@ def pytest_addoption(parser):
     parser.addoption('--remotes', action='append', default=[],
                      help='Elliptics node address')
     parser.addoption('--groups', action='store', help='elliptics groups', default='1,2,3')
-    parser.addoption('--loglevel', type='choice', choices=xrange(5), default=1)
+    parser.addoption('--loglevel', type='choice', choices=xrange(5), default=elliptics.log_level.debug)
 
     parser.addoption('--without-cocaine', action='store_true', default=False,
                      help='Turns off exec tests that are connected with cocaine')
+    parser.addoption('--backends-count', action='store', default=3,
+                     help='Number of backends that will be enabled per group on node')
+    parser.addoption('--nodes-count', action='store', default=3,
+                     help='Number of nodes that should be run')
+    parser.addoption('--recovery-keys', action='store', default=10,
+                     help='Number of keys that would be used at test_recovery')
 
 
 def set_property(obj, prop, value, check_value=None,
@@ -52,9 +58,8 @@ def raises(type, message, func, *args, **kwargs):
 
 @pytest.fixture(scope='class')
 def simple_node(request):
-    simple_node = elliptics.Node(elliptics.Logger("/dev/stderr", 4))
-    for r in request.config.option.remotes:
-        simple_node.add_remote(r)
+    simple_node = elliptics.Node(elliptics.Logger("client.log", elliptics.log_level.debug))
+    simple_node.add_remotes(request.config.option.remotes)
 
     def fin():
         print "Finilizing simple node"
@@ -79,8 +84,7 @@ class PassthroughWrapper(object):
 def connect(endpoints, groups, **kw):
     remotes = []
     for r in endpoints:
-        parts = r.split(":")
-        remotes.append((parts[0], int(parts[1])))
+        remotes.append(elliptics.Address.from_host_port_family(r))
 
     def rename(kw, old, new):
         if old in kw:
@@ -95,12 +99,7 @@ def connect(endpoints, groups, **kw):
     rename(kw, 'loglevel', 'log_level')
 
     n = elliptics.create_node(**kw)
-
-    for r in remotes:
-        try:
-            n.add_remote(r[0], r[1])
-        except Exception:
-            pass
+    n.add_remotes(remotes)
 
     s = elliptics.Session(n)
     s.add_groups(groups)
@@ -118,6 +117,17 @@ def elliptics_remotes(request):
 def elliptics_groups(request):
     return [int(g) for g in request.config.option.groups.split(',')]
 
+def make_trace_id(test_name):
+    import hashlib
+    return int(hashlib.sha512(test_name).hexdigest(), 16) % (1 << 64)
+
+def make_session(node, test_name, test_namespace=None):
+    session = elliptics.Session(node)
+    session.trace_id = make_trace_id(test_name)
+    if test_namespace:
+        session.set_namespace(test_namespace)
+    return session
+
 
 #@pytest.fixture(scope='module')
 @pytest.fixture
@@ -128,7 +138,8 @@ def elliptics_client(request):
     remote = request.config.option.remotes
     groups = [int(g) for g in request.config.option.groups.split(',')]
     loglevel = request.config.option.loglevel
-    return connect(remote, groups, loglevel=loglevel)
+    logfile = 'client.log'
+    return connect(remote, groups, loglevel=loglevel, logfile=logfile)
     # client = connect([remote], groups, loglevel=loglevel)
     # client.set_filter(elliptics.filters.all_with_ack)
     # return client

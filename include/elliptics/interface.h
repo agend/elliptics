@@ -37,6 +37,8 @@
 #include <elliptics/packet.h>
 #include <elliptics/srw.h>
 
+#include "logger.hpp"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -102,7 +104,7 @@ struct dnet_io_control {
 	 *
 	 * All parameters are releated to the received transaction reply.
 	 */
-	int 				(* complete)(struct dnet_net_state *st,
+	int 				(* complete)(struct dnet_addr *addr,
 							struct dnet_cmd *cmd,
 							void *priv);
 
@@ -143,16 +145,6 @@ struct dnet_io_control {
 	struct timespec			ts;
 };
 
-/*
- * Reads an object identified by the provided ID from the appropriate node.
- * In case of error completion callback may be invoked with all parameters
- * set to null, private pointer will be setto what was provided by the user
- * as private data).
- *
- * Returns negative error value in case of error.
- */
-int dnet_read_object(struct dnet_session *s, struct dnet_io_control *ctl);
-
 int dnet_search_range(struct dnet_node *n, struct dnet_id *id,
 		struct dnet_raw_id *start, struct dnet_raw_id *next);
 
@@ -165,57 +157,6 @@ int dnet_search_range(struct dnet_node *n, struct dnet_id *id,
 
 int __attribute__((weak)) dnet_send_read_data(void *state, struct dnet_cmd *cmd, struct dnet_io_attr *io,
 		void *data, int fd, uint64_t offset, int on_exit);
-
-/*
- * Reads given file from the storage. If there are multiple transformation functions,
- * they will be tried one after another.
- *
- * If @id is set, it is used as a main object ID, otherwise @file transformation
- * is used as object ID.
- *
- * Returns negative error value in case of error.
- *
- * dnet_read_file_direct() works the same way except it sets DNET_FLAGS_DIRECT flag,
- * which means it will ask node for given object, which is the closest in routing
- * table and will not allow to forward this request to other nodes.
- */
-int dnet_read_file_id(struct dnet_session *s, const char *file, struct dnet_id *id,
-		uint64_t offset, uint64_t size);
-int dnet_read_file(struct dnet_session *s, const char *file, const void *remote, int remote_size,
-		uint64_t offset, uint64_t size);
-
-/*
- * dnet_write_object() returns number of transactions sent. If it is equal to 0,
- * then no transactions were sent which indicates an error.
- *
- * ->complete() can be called multiple times, depending on how server sends data
- */
-int dnet_write_object(struct dnet_session *s, struct dnet_io_control *ctl);
-
-/*
- * Sends given file to the remote nodes and waits until all of them ack the write.
- *
- * Returns negative error value in case of error.
- */
-int dnet_write_file_id(struct dnet_session *s, const char *file, struct dnet_id *id, uint64_t local_offset,
-		uint64_t remote_offset, uint64_t size);
-
-int dnet_write_file(struct dnet_session *s, const char *file, const void *remote, int remote_len,
-		uint64_t local_offset, uint64_t remote_offset, uint64_t size);
-
-/*
- * Log level
- *
- * IT IS ALSO PROVIDED IN PYTHON BINDING so if you want to add new level
- * please also add it to elliptics_log_level and to BOOST_PYTHON_MODULE(core) in elliptics_python.cpp
- */
-enum dnet_log_level {
-	DNET_LOG_DATA = 0,
-	DNET_LOG_ERROR,
-	DNET_LOG_INFO,
-	DNET_LOG_NOTICE,
-	DNET_LOG_DEBUG,
-};
 
 #define DNET_MAX_ADDRLEN		256
 #define DNET_MAX_PORTLEN		8
@@ -233,17 +174,22 @@ enum dnet_log_level {
 #define DNET_CFG_RANDOMIZE_STATES	(1<<5)		/* randomize states for read requests */
 #define DNET_CFG_KEEPS_IDS_IN_CLUSTER	(1<<6)		/* keeps ids in elliptics cluster */
 
-struct dnet_log {
-	/*
-	 * Logging parameters.
-	 * Mask specifies set of the events we are interested in to log.
-	 * Private data is used in the log function to get access to whatever
-	 * user pointed to.
-	 */
-	int			log_level;
-	void			*log_private;
-	void 			(* log)(void *priv, int level, const char *msg);
-};
+static inline const char *dnet_flags_dump_cfgflags(uint64_t flags)
+{
+	static __thread char buffer[256];
+	static struct flag_info infos[] = {
+		{ DNET_CFG_JOIN_NETWORK, "join" },
+		{ DNET_CFG_NO_ROUTE_LIST, "no_route_list" },
+		{ DNET_CFG_MIX_STATES, "mix_states" },
+		{ DNET_CFG_NO_CSUM, "n_ocsum" },
+		{ DNET_CFG_RANDOMIZE_STATES, "randomize_states" },
+		{ DNET_CFG_KEEPS_IDS_IN_CLUSTER, "keeps_ids_in_cluster" },
+	};
+
+	dnet_flags_dump_raw(buffer, sizeof(buffer), flags, infos, sizeof(infos) / sizeof(infos[0]));
+
+	return buffer;
+}
 
 /*
  * New-style iterator control
@@ -273,11 +219,11 @@ struct dnet_backend_callbacks {
 	/* this must be provided as @priv argument to all above and below callbacks*/
 	void			*command_private;
 
-	/* fills storage statistics */
-	int			(* storage_stat)(void *priv, struct dnet_stat *st);
-
 	/* fills storage statistics in json format */
 	int			(* storage_stat_json)(void *priv, char **json_stat, size_t *size);
+
+	/* returns total elements at backend */
+	uint64_t	(* total_elements)(void *priv);
 
 	/* cleanups backend at exit */
 	void			(* backend_cleanup)(void *command_private);
@@ -293,7 +239,11 @@ struct dnet_backend_callbacks {
 	 * Iterator.
 	 * Invokes callback on each record's data and metadata.
 	 */
-	int			(* iterator)(struct dnet_iterator_ctl *ictl);
+	int			(* iterator)(struct dnet_iterator_ctl *ictl,
+			struct dnet_iterator_request *ireq, struct dnet_iterator_range *irange);
+
+	int			(* defrag_status)(void *priv);
+	int			(* defrag_start)(void *priv);
 
 	/*
 	 * Returns dir used by backend
@@ -322,7 +272,7 @@ struct dnet_config
 	 * Wait timeout in seconds used for example to wait
 	 * for remote content sync.
 	 */
-	unsigned int		wait_timeout;
+	long			wait_timeout;
 
 	/*
 	 * Specifies wether given node will join the network,
@@ -333,27 +283,8 @@ struct dnet_config
 	 */
 	int			flags;
 
-	/*
-	 * If node joins network this will be used to find a group to join.
-	 */
-	int			group_id;
-
 	/* Private logger */
-	struct dnet_log		*log;
-
-	/*
-	 * Network command handler.
-	 * Returns negative error value or zero in case of success.
-	 *
-	 * Private data is accessible from the handler as parameter.
-	 */
-	struct dnet_backend_callbacks	*cb;
-
-	/*
-	 * Free and total space on given storage.
-	 */
-	unsigned long long	storage_free;
-	unsigned long long	storage_size;
+	dnet_logger		*log;
 
 	/* Notify hash table size */
 	unsigned int		hash_size;
@@ -384,14 +315,6 @@ struct dnet_config
 	 */
 	int			net_thread_num;
 
-	/*
-	 * This dir hosts:
-	 *  - 'ids' file automatically generated for ID ranges
-	 *  - python.init script used to initialize external python workers
-	 *  - all scripts are hosted here and are chrooted here
-	 */
-	char			history_env[1024];
-
 	/* IO nice parameters for background operations */
 	int			bg_ionice_class;
 	int			bg_ionice_prio;
@@ -408,33 +331,32 @@ struct dnet_config
 
 	struct srw_init_ctl	srw;
 
-	/* Total cache size */
-	uint64_t		cache_size;
-
-	int			cache_sync_timeout;
-
-	/* Caches number */
-	unsigned int		caches_number;
-
-	/* Cache pages number */
-	unsigned int	cache_pages_number;
-
-	/* Cache pages proportions */
-	unsigned int*	cache_pages_proportions;
+	int			reserved_for_future_use_2[5];
+	int			*reserved_for_future_use_3[1];
 
 	/*
 	 * Monitor socket port
 	 */
 	unsigned int		monitor_port;
 
+	/* Minimum timeout for call tree.
+	 * Only call tree with spent time >= this timeout will be presented at monitor statistics */
+	long			monitor_call_tree_timeout;
+
 	/* so that we do not change major version frequently */
-	int			reserved_for_future_use[8 - (sizeof(unsigned int*) / sizeof(int))];
+	int			reserved_for_future_use[8];
 };
 
 struct dnet_node *dnet_get_node_from_state(void *state);
 
 int __attribute__((weak)) dnet_session_set_groups(struct dnet_session *s, const int *groups, int group_num);
 int *dnet_session_get_groups(struct dnet_session *s, int *count);
+
+void dnet_session_set_trace_id(struct dnet_session *s, trace_id_t trace_id);
+trace_id_t dnet_session_get_trace_id(struct dnet_session *s);
+
+void dnet_session_set_trace_bit(struct dnet_session *s, int trace);
+int dnet_session_get_trace_bit(struct dnet_session *s);
 
 void dnet_session_set_ioflags(struct dnet_session *s, uint32_t ioflags);
 uint32_t dnet_session_get_ioflags(struct dnet_session *s);
@@ -448,10 +370,16 @@ void dnet_session_get_timestamp(struct dnet_session *s, struct dnet_time *ts);
 struct dnet_id *dnet_session_get_direct_id(struct dnet_session *s);
 void dnet_session_set_direct_id(struct dnet_session *s, const struct dnet_id *id);
 
+const struct dnet_addr *dnet_session_get_direct_addr(struct dnet_session *s);
+void dnet_session_set_direct_addr(struct dnet_session *s, const struct dnet_addr *addr);
+
+uint32_t dnet_session_get_direct_backend(struct dnet_session *s);
+void dnet_session_set_direct_backend(struct dnet_session *s, uint32_t backend_id);
+
 void dnet_session_set_user_flags(struct dnet_session *s, uint64_t user_flags);
 uint64_t dnet_session_get_user_flags(struct dnet_session *s);
 
-void dnet_session_set_timeout(struct dnet_session *s, unsigned int wait_timeout);
+void dnet_session_set_timeout(struct dnet_session *s, long wait_timeout);
 struct timespec *dnet_session_get_timeout(struct dnet_session *s);
 
 void dnet_set_keepalive(struct dnet_node *n, int idle, int cnt, int interval);
@@ -467,9 +395,9 @@ struct dnet_node *dnet_session_get_node(struct dnet_session *s);
 /*
  * Initialize private logging system.
  */
-int dnet_log_init(struct dnet_node *s, struct dnet_log *l);
+int dnet_log_init(struct dnet_node *s, dnet_logger *l);
 void __attribute__((weak)) dnet_log_raw(struct dnet_node *n, int level, const char *format, ...) DNET_LOG_CHECK;
-void __attribute__((weak)) dnet_log_raw_log_only(struct dnet_log *l, int level, const char *format, ...) DNET_LOG_CHECK;
+void __attribute__((weak)) dnet_log_raw_log_only(dnet_logger *l, int level, const char *format, ...) DNET_LOG_CHECK;
 
 #define NIP6(addr) \
 	(addr).s6_addr[0], \
@@ -493,7 +421,7 @@ void __attribute__((weak)) dnet_log_raw_log_only(struct dnet_log *l, int level, 
 /*
  * Logging helpers used for the fine-printed address representation.
  */
-static inline char *dnet_server_convert_addr_raw(struct sockaddr *sa, unsigned int len, char *inet_addr, int inet_size)
+static inline const char *dnet_server_convert_addr_raw(struct sockaddr *sa, unsigned int len, char *inet_addr, int inet_size)
 {
 	memset(inet_addr, 0, inet_size);
 	if (len == sizeof(struct sockaddr_in)) {
@@ -502,11 +430,15 @@ static inline char *dnet_server_convert_addr_raw(struct sockaddr *sa, unsigned i
 	} else if (len == sizeof(struct sockaddr_in6)) {
 		struct sockaddr_in6 *in = (struct sockaddr_in6 *)sa;
 		snprintf(inet_addr, inet_size, NIP6_FMT, NIP6(in->sin6_addr));
+	} else if (len == 0) {
+		return "null_address";
+	} else {
+		return "invalid_address";
 	}
 	return inet_addr;
 }
 
-static inline char *dnet_server_convert_addr(struct sockaddr *sa, unsigned int len)
+static inline const char *dnet_server_convert_addr(struct sockaddr *sa, unsigned int len)
 {
 	static __thread char __inet_addr[128];
 	return dnet_server_convert_addr_raw(sa, len, __inet_addr, sizeof(__inet_addr));
@@ -524,7 +456,7 @@ static inline int dnet_server_convert_port(struct sockaddr *sa, unsigned int len
 	return 0;
 }
 
-static inline char *dnet_server_convert_dnet_addr_raw(const struct dnet_addr *addr, char *inet_addr, int inet_size)
+static inline const char *dnet_server_convert_dnet_addr_raw(const struct dnet_addr *addr, char *inet_addr, int inet_size)
 {
 	memset(inet_addr, 0, inet_size);
 	if (addr->family == AF_INET) {
@@ -533,28 +465,32 @@ static inline char *dnet_server_convert_dnet_addr_raw(const struct dnet_addr *ad
 	} else if (addr->family == AF_INET6) {
 		const struct sockaddr_in6 *in = (const struct sockaddr_in6 *)addr->addr;
 		snprintf(inet_addr, inet_size, NIP6_FMT":%d", NIP6(in->sin6_addr), ntohs(in->sin6_port));
+	} else if (addr->family == 0) {
+		return "null_address";
+	} else {
+		return "invalid_address";
 	}
 	return inet_addr;
 }
 
-static inline char *dnet_server_convert_dnet_addr(const struct dnet_addr *sa)
+static inline const char *dnet_server_convert_dnet_addr(const struct dnet_addr *sa)
 {
 	static __thread char ___inet_addr[128];
 	return dnet_server_convert_dnet_addr_raw(sa, ___inet_addr, sizeof(___inet_addr));
 }
 
 struct dnet_addr *dnet_state_addr(struct dnet_net_state *st);
-static inline char *dnet_state_dump_addr(struct dnet_net_state *st)
+static inline const char *dnet_state_dump_addr(struct dnet_net_state *st)
 {
 	return dnet_server_convert_dnet_addr(dnet_state_addr(st));
 }
 
-static inline char *dnet_state_dump_addr_only(struct dnet_addr *a)
+static inline const char *dnet_state_dump_addr_only(struct dnet_addr *a)
 {
 	return dnet_server_convert_addr((struct sockaddr *)a->addr, a->addr_len);
 }
 
-static inline char *dnet_print_time(const struct dnet_time *t)
+static inline const char *dnet_print_time(const struct dnet_time *t)
 {
 	char str[64];
 	struct tm tm;
@@ -589,11 +525,17 @@ struct dnet_node *dnet_server_node_create(struct dnet_config_data *cfg_data);
 void dnet_server_node_destroy(struct dnet_node *s);
 
 /*
- * dnet_add_state() is used to add a node into the route list, the more
+ * dnet_add_state() is used to add remote addresses into the route list, the more
  * routes are added the less network lookups will be performed to send/receive
  * data requests.
  */
-int dnet_add_state(struct dnet_node *n, const char *addr_str, int port, int family, int flags);
+int dnet_add_state(struct dnet_node *n, const struct dnet_addr *addr, int num, int flags);
+
+/*
+ * Converts address string into dnet_addr structure.
+ * This optionally resolves DNS name.
+ */
+int dnet_create_addr(struct dnet_addr *addr, const char *addr_str, int port, int family);
 
 /*
  * Returns number of states we are connected to.
@@ -602,7 +544,9 @@ int dnet_add_state(struct dnet_node *n, const char *addr_str, int port, int fami
 
 int dnet_state_num(struct dnet_session *s);
 int dnet_node_state_num(struct dnet_node *n);
+struct dnet_net_state *dnet_state_search_by_addr(struct dnet_node *n, const struct dnet_addr *addr);
 struct dnet_net_state *dnet_state_get_first(struct dnet_node *n, const struct dnet_id *id);
+struct dnet_net_state *dnet_state_get_first_with_backend(struct dnet_node *n, const struct dnet_id *id, int *backend_id);
 void dnet_state_put(struct dnet_net_state *st);
 
 #define DNET_DUMP_NUM	8
@@ -668,23 +612,23 @@ static inline char *dnet_dump_id_str(const unsigned char *id)
 }
 
 /*
- * Lookup a node which hosts given ID.
- *
- * dnet_lookup_object() will invoke given callback when lookup reply is received.
- * dnet_lookup() will add received address into local route table.
- * dnet_lookup_complete() is a completion function which adds received address
- * 	into local route table.
- *
- * Effectively dnet_lookup() is a dnet_lookup_object() with dnet_lookup_complete()
- * 	completion function.
+ * Returns 0 if versions are equal.
+ * negative of positive value if @st->version is smaller or bigger than @version one.
  */
-int dnet_lookup_object(struct dnet_session *s, struct dnet_id *id,
-	int (* complete)(struct dnet_net_state *, struct dnet_cmd *, void *),
-	void *priv);
-
-int dnet_stat_local(struct dnet_net_state *st, struct dnet_id *id);
-
 int dnet_version_compare(struct dnet_net_state *st, int *version);
+
+/*
+ * Returns 0 if version are compatible.
+ * Currently this means the 2 highest version fields are equal.
+ *
+ * Otherwise negative error code is returned.
+ */
+int dnet_version_check(struct dnet_net_state *st, int *version);
+
+/*
+ * Returns 4-ints version array.
+ */
+int *dnet_version(struct dnet_net_state *state);
 
 /*!
  * Compares two dnet_time structs
@@ -738,60 +682,6 @@ static inline int dnet_id_cmp(const struct dnet_id *id1, const struct dnet_id *i
 }
 
 /*
- * Send given number of bytes as reply command.
- * It will fill transaction, command and ID from the original command and copy given data.
- * It will set DNET_FLAGS_MORE if original command requested acknowledge or @more is set.
- *
- * If cmd->cmd is DNET_CMD_SYNC then plain data will be sent back, otherwise transaction
- * reply will be generated. So effectively difference is in DNET_TRANS_REPLY bit presence.
- */
-int __attribute__((weak)) dnet_send_reply(void *state, struct dnet_cmd *cmd, const void *odata, unsigned int size, int more);
-int __attribute__((weak)) dnet_send_reply_threshold(void *state, struct dnet_cmd *cmd, const void *odata, unsigned int size, int more);
-
-
-/*
- * Request statistics from the node corresponding to given ID.
- * If @id is NULL statistics will be requested from all connected nodes.
- * @cmd specified stat command to use (DNET_CMD_STAT or DNET_CMD_STAT_COUNT).
- *
- * Function will sleep and print into DNET_LOG_INFO log level short
- * statistics if no @complete function is provided, otherwise it returns
- * after queueing all transactions and appropriate callback will be
- * invoked asynchronously.
- *
- * Function returns number of nodes statistics request was sent to
- * or negative error code. In case of error callback completion can
- * still be called.
- */
-int dnet_request_stat(struct dnet_session *s, struct dnet_id *id,
-	unsigned int cmd,
-	int (* complete)(struct dnet_net_state *state,
-			struct dnet_cmd *cmd,
-			void *priv),
-	void *priv);
-
-/*
- * Request monitor statistics from the node corresponding to given ID.
- * If @id is NULL statistics will be requested from all connected nodes.
- * @category specifies category of requested statistics.
- *
- * Function will sleep and print into DNET_LOG_INFO log level short
- * statistics if no @complete function is provided, otherwise it returns
- * after queueing all transactions and appropriate callback will be
- * invoked asynchronously.
- *
- * Function returns number of nodes statistics request was sent to
- * or negative error code. In case of error callback completion can
- * still be called.
- */
-int dnet_request_monitor_stat(struct dnet_session *s, struct dnet_id *id,
-	int category,
-	int (* complete)(struct dnet_net_state *state,
-			struct dnet_cmd *cmd,
-			void *priv),
-	void *priv);
-
-/*
  * Request notifications when given ID is modified.
  * Notifications are sent after update was stored in the IO backend.
  * @id and @complete are not allowed to be NULL.
@@ -799,7 +689,7 @@ int dnet_request_monitor_stat(struct dnet_session *s, struct dnet_id *id,
  * @complete will be invoked each time object with given @id is modified.
  */
 int dnet_request_notification(struct dnet_session *s, struct dnet_id *id,
-	int (* complete)(struct dnet_net_state *state,
+	int (* complete)(struct dnet_addr *state,
 			struct dnet_cmd *cmd,
 			void *priv),
 	void *priv);
@@ -819,10 +709,10 @@ struct dnet_trans_control
 	unsigned int		cmd;
 	uint64_t		cflags;
 
-	unsigned int		size;
 	void			*data;
+	unsigned int		size;
 
-	int			(* complete)(struct dnet_net_state *state, struct dnet_cmd *cmd, void *priv);
+	int			(* complete)(struct dnet_addr *addr, struct dnet_cmd *cmd, void *priv);
 	void			*priv;
 };
 
@@ -830,38 +720,16 @@ struct dnet_trans_control
  * Allocate and send transaction according to above control structure.
  */
 int dnet_trans_alloc_send(struct dnet_session *s, struct dnet_trans_control *ctl);
+void dnet_io_trans_alloc_send(struct dnet_session *s, struct dnet_io_control *ctl);
+int dnet_trans_alloc_send_state(struct dnet_session *s, struct dnet_net_state *st, struct dnet_trans_control *ctl);
 int dnet_trans_create_send_all(struct dnet_session *s, struct dnet_io_control *ctl);
 
 int dnet_request_cmd(struct dnet_session *s, struct dnet_trans_control *ctl);
-int dnet_request_cmd_id(struct dnet_session *s, struct dnet_id *id, struct dnet_trans_control *ctl);
 
 int dnet_fill_addr(struct dnet_addr *addr, const char *saddr, const int port, const int sock_type, const int proto);
 
 /* Change node status on given address or ID */
-int dnet_update_status(struct dnet_session *s, struct dnet_addr *addr, struct dnet_id *id, struct dnet_node_status *status);
-
-/*
- * Remove object by @id
- * If callback is provided, it will be invoked on completion, otherwise
- * function will block until server returns an acknowledge.
- *
- * Returns negative number on error, zero on success
- * and positive number is count of objects which will be provided
- * to complete function.
- */
-int dnet_remove_object(struct dnet_session *s, struct dnet_id *id,
-	int (* complete)(struct dnet_net_state *state,
-			struct dnet_cmd *cmd,
-			void *priv),
-	void *priv);
-
-/* Remove object with @id from the storage immediately */
-int dnet_remove_object_now(struct dnet_session *s, struct dnet_id *id);
-
-/*
- * Remove given file (identified by name or ID) from the storage.
- */
-int dnet_remove_file(struct dnet_session *s, char *remote, int remote_len, struct dnet_id *id);
+int dnet_update_status(struct dnet_session *s, const struct dnet_addr *addr, struct dnet_id *id, struct dnet_node_status *status);
 
 /*
  * Transformation helper, which uses *ppos as an index for transformation function.
@@ -927,9 +795,6 @@ enum id_params {
 	DNET_ID_PARAM_FREE_SPACE,
 };
 
-//TODO int dnet_generate_ids_by_param(struct dnet_session *s, struct dnet_id *id, enum id_params param, struct dnet_id_param **dst);
-//TODO int64_t dnet_get_param(struct dnet_session *s, struct dnet_id *id, enum id_params param);
-
 struct dnet_check_reply {
 	int			total;
 	int			completed;
@@ -985,11 +850,11 @@ int dnet_request_check(struct dnet_session *s, struct dnet_check_request *r);
 
 long __attribute__((weak)) dnet_get_id(void);
 
-static inline int is_trans_destroyed(struct dnet_net_state *st, struct dnet_cmd *cmd)
+static inline int is_trans_destroyed(struct dnet_cmd *cmd)
 {
 	int ret = 0;
 
-	if (!st || !cmd || (cmd->flags & DNET_FLAGS_DESTROY)) {
+	if (!cmd || (cmd->flags & DNET_FLAGS_DESTROY)) {
 		ret = 1;
 		if (cmd && cmd->status)
 			ret = cmd->status;
@@ -1001,7 +866,8 @@ static inline int is_trans_destroyed(struct dnet_net_state *st, struct dnet_cmd 
 int dnet_mix_states(struct dnet_session *s, struct dnet_id *id, int **groupsp);
 
 char * __attribute__((weak)) dnet_cmd_string(int cmd);
-char *dnet_counter_string(int cntr, int cmd_num);
+const char *dnet_backend_state_string(uint32_t state);
+const char *dnet_backend_defrag_state_string(uint32_t state);
 
 int dnet_checksum_file(struct dnet_node *n, const char *file, uint64_t offset, uint64_t size, void *csum, int csize);
 int dnet_checksum_fd(struct dnet_node *n, int fd, uint64_t offset, uint64_t size, void *csum, int csize);
@@ -1013,29 +879,46 @@ int dnet_send_file_info_ts(void *state, struct dnet_cmd *cmd, int fd,
 		uint64_t offset, int64_t size, struct dnet_time *timestamp);
 int dnet_send_file_info_ts_without_fd(void *state, struct dnet_cmd *cmd, const void *data, int64_t size, struct dnet_time *timestamp);
 
-int dnet_get_routes(struct dnet_session *s, struct dnet_id **ids, struct dnet_addr **addrs);
+
+struct dnet_route_entry
+{
+	struct dnet_raw_id id;
+	struct dnet_addr addr;
+	int group_id;
+	uint32_t backend_id;
+};
+
+int dnet_get_routes(struct dnet_session *s, struct dnet_route_entry **entries);
 /*
  * Send a shell/python command to the remote node for execution.
  */
 int dnet_send_cmd(struct dnet_session *s,
 	struct dnet_id *id,
-	int (* complete)(struct dnet_net_state *state,
+	int (* complete)(struct dnet_addr *addr,
 			struct dnet_cmd *cmd,
 			void *priv),
 	void *priv,
 	struct sph *e);
 
 int dnet_flags(struct dnet_node *n);
-void dnet_set_timeouts(struct dnet_node *n, int wait_timeout, int check_timeout);
+void dnet_set_timeouts(struct dnet_node *n, long wait_timeout, long check_timeout);
 
 #define DNET_CONF_ADDR_DELIM	':'
 int dnet_parse_addr(char *addr, int *portp, int *familyp);
 
-int dnet_start_defrag(struct dnet_session *s, struct dnet_defrag_ctl *ctl);
-
-int dnet_discovery_add(struct dnet_node *n, char *remote_addr, int remote_port, int remote_family);
-
 int dnet_parse_numeric_id(const char *value, unsigned char *id);
+
+struct dnet_vm_stat {
+	uint16_t	la[3];
+	uint64_t	vm_active;
+	uint64_t	vm_inactive;
+	uint64_t	vm_total;
+	uint64_t	vm_free;
+	uint64_t	vm_cached;
+	uint64_t	vm_buffers;
+};
+
+int dnet_get_vm_stat(dnet_logger *l, struct dnet_vm_stat *st);
 
 #ifdef __cplusplus
 }

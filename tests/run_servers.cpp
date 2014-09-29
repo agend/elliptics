@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <iostream>
+#include <fstream>
 
 #include <boost/program_options.hpp>
 #include <boost/asio.hpp>
@@ -45,9 +46,93 @@ using namespace ioremap::elliptics;
 
 static std::shared_ptr<tests::nodes_data> global_data;
 static int result_status = 0;
+static std::ofstream logs_out;
 
-static void stop_servers(int sig, siginfo_t *, void *)
+struct special_log_struct_next
 {
+};
+
+struct special_log_struct
+{
+};
+
+namespace test {
+static const special_log_struct log = {};
+
+struct special_endl
+{
+} static endl;
+}
+
+special_log_struct_next &operator <<(special_log_struct_next &out, test::special_endl &)
+{
+	std::cerr << std::endl;
+	logs_out << std::endl;
+	return out;
+}
+
+template <typename T>
+special_log_struct_next &operator <<(special_log_struct_next &out, const T &value)
+{
+	std::cerr << value;
+	logs_out << value;
+
+	return out;
+}
+
+template <typename T>
+special_log_struct_next &operator <<(const special_log_struct &, const T &value)
+{
+	char str[64];
+	char time_str[64];
+	struct tm tm;
+	struct timeval tv;
+
+	static special_log_struct_next out;
+
+	gettimeofday(&tv, NULL);
+	localtime_r((time_t *)&tv.tv_sec, &tm);
+	strftime(str, sizeof(str), "%F %R:%S", &tm);
+
+	snprintf(time_str, sizeof(time_str), "%s.%06lu ", str, tv.tv_usec);
+
+	out << time_str << value;
+	return out;
+}
+
+static void stop_servers(int sig, siginfo_t *info, void *)
+{
+	if (sig == SIGCHLD) {
+		auto &out = (test::log << "Caught signal: " << sig << ", pid: " << info->si_pid
+			<< ", status: " << info->si_status << ", code: " << info->si_code << ", description: \"");
+		switch (info->si_code) {
+			case CLD_EXITED:
+				out << "Child has exited";
+				break;
+			case CLD_KILLED:
+				out << "Child has terminated abnormally and did not create a core file";
+				break;
+			case CLD_DUMPED:
+				out << "Child has terminated abnormally and created a core file";
+				break;
+			case CLD_TRAPPED:
+				out << "Traced child has trapped";
+				break;
+			case CLD_STOPPED:
+				out << "Child has stopped";
+				break;
+			case CLD_CONTINUED:
+				out << "Stopped child has continued";
+				break;
+			default:
+				out << "Unknown happened";
+				break;
+		}
+		out << "\"" << test::endl;
+	} else {
+		test::log << "Caught signal: " << sig << ", err: " << info->si_errno << ", pid: " << info->si_pid << ", status: " << info->si_status << test::endl;
+	}
+
 	std::shared_ptr<tests::nodes_data> data;
 	std::swap(global_data, data);
 
@@ -90,6 +175,36 @@ static bool read_option(const rapidjson::Value &doc, const std::string &value, b
 	return default_value;
 }
 
+static int fill_config(tests::config_data &config, std::vector<tests::config_data> &backends, std::string &prefix, const rapidjson::Value &options, bool is_server)
+{
+	for (auto it = options.MemberBegin(); it != options.MemberEnd(); ++it) {
+		const std::string name(it->name.GetString(), it->name.GetStringLength());
+		const rapidjson::Value &value = it->value;
+
+		if (is_server && name == "backends") {
+			backends.resize(value.Size(), backends.front());
+
+			for (size_t i = 0; i < value.Size(); ++i) {
+				size_t prefix_size = prefix.size();
+				prefix += ".backends[" + boost::lexical_cast<std::string>(i) + "]";
+				int err = fill_config(backends[i], backends, prefix, value[i], false);
+				prefix.resize(prefix_size);
+				if (err)
+					return err;
+			}
+		} else if (value.IsInt64()) {
+			config(name, value.GetInt64());
+		} else if (value.IsString()) {
+			config(name, std::string(value.GetString(), value.GetStringLength()));
+		} else {
+			test::log << "Field \"" << prefix << "." << name << "\" has unknown type" << test::endl;
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 /*!
  * \brief Run servers by json configuration
  *
@@ -119,18 +234,6 @@ static int run_servers(const rapidjson::Value &doc)
 	bool fork = read_option(doc, "fork", false);
 	bool monitor = read_option(doc, "monitor", true);
 
-#ifndef HAVE_COCAINE
-	if (srw) {
-		std::cerr << "There is no srw support" << std::endl;
-		return 1;
-	}
-#endif
-
-	if (!doc.HasMember("servers")) {
-		std::cerr << "Field \"servers\" is missed" << std::endl;
-		return 1;
-	}
-
 	if (!doc.HasMember("path")) {
 		std::cerr << "Field \"path\" is missed" << std::endl;
 		return 1;
@@ -139,13 +242,32 @@ static int run_servers(const rapidjson::Value &doc)
 	const rapidjson::Value &path = doc["path"];
 
 	if (!path.IsString()) {
-		std::cout << "Field \"path\" must be string" << std::endl;
+		std::cerr << "Field \"path\" must be string" << std::endl;
+		return 1;
+	}
+
+	const std::string logs_out_path = std::string(path.GetString()) + "/run_servers.log";
+	logs_out.open(logs_out_path.c_str());
+	if (!logs_out) {
+		std::cerr << "Failed to open \"" << logs_out_path << "\" for writing" << std::endl;
+		return 1;
+	}
+
+#ifndef HAVE_COCAINE
+	if (srw) {
+		test::log << "There is no srw support" << test::endl;
+		return 1;
+	}
+#endif
+
+	if (!doc.HasMember("servers")) {
+		test::log << "Field \"servers\" is missed" << test::endl;
 		return 1;
 	}
 
 	const rapidjson::Value &servers = doc["servers"];
 	if (!servers.IsArray()) {
-		std::cerr << "Field \"servers\" must be an array" << std::endl;
+		test::log << "Field \"servers\" must be an array" << test::endl;
 		return 1;
 	}
 
@@ -159,34 +281,25 @@ static int run_servers(const rapidjson::Value &doc)
 
 		tests::config_data config;
 
-		if (server.HasMember("group")) {
-			const auto &group = server["group"];
-			if (group.IsInt())
-				unique_groups.insert(group.GetInt());
-		}
-
-		for (auto it = server.MemberBegin(); it != server.MemberEnd(); ++it) {
-			const std::string name(it->name.GetString(), it->name.GetStringLength());
-			const rapidjson::Value &value = it->value;
-
-			if (value.IsInt64()) {
-				config(name, value.GetInt64());
-			} else if (value.IsString()) {
-				config(name, std::string(value.GetString(), value.GetStringLength()));
-			} else {
-				std::cerr << "Field \"servers[" << i << "]." << name << "\" has unknown type" << std::endl;
-				return 1;
-			}
-		}
+		std::string prefix = "servers[" + boost::lexical_cast<std::string>(i) + "]";
+		int err = fill_config(config, configs[i].backends, prefix, server, true);
+		if (err)
+			return err;
 
 		configs[i].apply_options(config);
-		configs[i].log_path = "/dev/stderr";
+
+		for (size_t j = 0; j < configs[i].backends.size(); ++j) {
+			tests::config_data &backend = configs[i].backends[j];
+
+			if (backend.has_value("group"))
+				unique_groups.insert(atoi(backend.string_value("group").c_str()));
+		}
 	}
 
 	try {
 		global_data = tests::start_nodes(std::cerr, configs, std::string(path.GetString(), path.GetStringLength()), fork, monitor);
 	} catch (std::exception &err) {
-		std::cerr << "Error during startup: " << err.what() << std::endl;
+		test::log << "Error during startup: " << err.what() << test::endl;
 		return 1;
 	}
 
@@ -197,7 +310,7 @@ static int run_servers(const rapidjson::Value &doc)
 		try {
 			tests::upload_application(global_data->locator_port, global_data->directory.path());
 		} catch (std::exception &exc) {
-			std::cerr << "Can not upload application: " << exc.what() << std::endl;
+			test::log << "Can not upload application: " << exc.what() << test::endl;
 			global_data.reset();
 			return 1;
 		}
@@ -206,7 +319,7 @@ static int run_servers(const rapidjson::Value &doc)
 			sess.set_groups(groups);
 			tests::start_application(sess, tests::application_name());
 		} catch (std::exception &exc) {
-			std::cerr << "Can not start application: " << exc.what() << std::endl;
+			test::log << "Can not start application: " << exc.what() << test::endl;
 			global_data.reset();
 			return 1;
 		}
@@ -215,12 +328,17 @@ static int run_servers(const rapidjson::Value &doc)
 			sess.set_groups(groups);
 			tests::init_application_impl(sess, tests::application_name(), *global_data);
 		} catch (std::exception &exc) {
-			std::cerr << "Can not init application: " << exc.what() << std::endl;
+			test::log << "Can not init application: " << exc.what() << test::endl;
 			global_data.reset();
 			return 1;
 		}
 	}
 #endif
+
+	for (size_t i = 0; i < global_data->nodes.size(); ++i) {
+		tests::server_node &node = global_data->nodes.at(i);
+		test::log << "Started node #" << i << ", addr: " << node.remote().to_string() << ", pid: " << node.pid() << test::endl;
+	}
 
 	{
 		rapidjson::Document info;
@@ -234,8 +352,8 @@ static int run_servers(const rapidjson::Value &doc)
 			rapidjson::Value server;
 			server.SetObject();
 
-			rapidjson::Value remote(node.remote().c_str(), node.remote().size(), info.GetAllocator());
-			remote.SetString(node.remote().c_str(), info.GetAllocator());
+			rapidjson::Value remote;
+			remote.SetString(node.remote().to_string_with_family().c_str(), info.GetAllocator());
 			server.AddMember("remote", remote, info.GetAllocator());
 
 			rapidjson::Value monitor_port;
@@ -255,6 +373,8 @@ static int run_servers(const rapidjson::Value &doc)
 	}
 
 	setup_signals();
+
+	test::log << "Succesffully started all servers" << test::endl;
 
 	while (global_data)
 		sleep(1);
@@ -283,9 +403,11 @@ int main(int, char *[])
 	try {
 		return run_servers(doc);
 	} catch (std::exception &exc) {
-		std::cout << exc.what() << std::endl;
+		test::log << "Failed to start servers: " << exc.what() << test::endl;
 		return 1;
 	}
+
+	test::log << "Exit with status: " << result_status << test::endl;
 
 	return result_status;
 }

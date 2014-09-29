@@ -17,7 +17,8 @@
  * along with Elliptics.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../include/elliptics/cppdef.h"
+#include "../../include/elliptics/result_entry.hpp"
+#include "../../include/elliptics/session.hpp"
 
 #include <condition_variable>
 #include <mutex>
@@ -147,6 +148,12 @@ bool async_result<T>::ready() const
 }
 
 template <typename T>
+size_t async_result<T>::total() const
+{
+	return m_data->total;
+}
+
+template <typename T>
 dnet_time async_result<T>::elapsed_time() const
 {
 	dnet_time end;
@@ -203,6 +210,32 @@ bool async_result<find_indexes_result_entry>::get(find_indexes_result_entry &ent
 	wait(session::throw_at_get);
 	if (!m_data->results.empty()) {
 		entry = m_data->results[0];
+		return true;
+	}
+	return false;
+}
+
+/*!
+ * \brief Waits for async result for get_index_metadata and sets it to output parameter \a entry
+ * \param entry Output parameter where result will be placed
+ * \return Returns true iff result was successfully obtained
+ */
+template <>
+bool async_result<get_index_metadata_result_entry>::get(get_index_metadata_result_entry &entry)
+{
+	wait(session::throw_at_get);
+	if (!m_data->results.empty()) {
+		entry.index_size = 0;
+		entry.is_valid = true;
+		entry.shard_id = -1;
+		for (auto it = m_data->results.begin(); it != m_data->results.end(); ++it) {
+			if (it->is_valid) {
+				entry.index_size += it->index_size;
+			} else {
+				entry.is_valid = false;
+				return false;
+			}
+		}
 		return true;
 	}
 	return false;
@@ -483,6 +516,21 @@ void async_result_handler<find_indexes_result_entry>::process(const find_indexes
 	}
 }
 
+/*!
+ * \brief Processes index metadata if result_handler is set or saves metadata into async_result array
+ * \param result Index metadata
+ */
+template <>
+void async_result_handler<get_index_metadata_result_entry>::process(const get_index_metadata_result_entry &result)
+{
+	std::unique_lock<std::mutex> locker(m_data->lock);
+	if (m_data->result_handler) {
+		m_data->result_handler(result);
+	} else {
+		m_data->results.push_back(result);
+	}
+}
+
 template <typename T>
 void async_result_handler<T>::complete(const error_info &error)
 {
@@ -509,20 +557,17 @@ bool async_result_handler<T>::check(error_info *error)
 			dnet_cmd command;
 			command.status = 0;
 			for (auto it = m_data->statuses.begin(); it != m_data->statuses.end(); ++it) {
+				const bool failed_to_send = !(it->flags & DNET_FLAGS_REPLY);
+				const bool ignore_error = failed_to_send && it->status == -ENXIO;
+
 				if (it->status == 0) {
 					++success;
-				} else if (command.status == 0) {
+				} else if (command.status == 0 && !ignore_error) {
 					command = *it;
 				}
 			}
-			if (success == 0) {
-				if (command.status) {
-					*error = create_error(command);
-				} else {
-					*error = create_error(-ENXIO, "insufficient results count due to checker: "
-							"%zu of %zu (%zu)",
-						success, m_data->total, m_data->statuses.size());
-				}
+			if (success == 0 && command.status) {
+				*error = create_error(command);
 			} else {
 				*error = create_error(-ENXIO, "insufficient results count due to checker: "
 						"%zu of %zu (%zu)",
@@ -552,26 +597,39 @@ bool async_result_handler<find_indexes_result_entry>::check(error_info *error)
 	return true;
 }
 
+/*!
+ * \brief Checks whether async_result was correctly obtained
+ * \param error Out parameter filled with error_info if error occured during obtaining async_result
+ * \return Returns true iff no error occured during obtaining async_result
+ */
+template <>
+bool async_result_handler<get_index_metadata_result_entry>::check(error_info *error)
+{
+	if (error)
+		*error = error_info();
+	return true;
+}
+
 template class async_result<callback_result_entry>;
 template class async_result<read_result_entry>;
 template class async_result<lookup_result_entry>;
-template class async_result<stat_result_entry>;
-template class async_result<stat_count_result_entry>;
 template class async_result<monitor_stat_result_entry>;
+template class async_result<backend_status_result_entry>;
 template class async_result<exec_result_entry>;
 template class async_result<iterator_result_entry>;
 template class async_result<index_entry>;
 template class async_result<find_indexes_result_entry>;
+template class async_result<get_index_metadata_result_entry>;
 
 template class async_result_handler<callback_result_entry>;
 template class async_result_handler<read_result_entry>;
 template class async_result_handler<lookup_result_entry>;
-template class async_result_handler<stat_result_entry>;
-template class async_result_handler<stat_count_result_entry>;
 template class async_result_handler<monitor_stat_result_entry>;
+template class async_result_handler<backend_status_result_entry>;
 template class async_result_handler<exec_result_entry>;
 template class async_result_handler<iterator_result_entry>;
 template class async_result_handler<index_entry>;
 template class async_result_handler<find_indexes_result_entry>;
+template class async_result_handler<get_index_metadata_result_entry>;
 
 } }

@@ -39,17 +39,11 @@
 
 using namespace ioremap::elliptics;
 
-#ifndef __unused
-#define __unused	__attribute__ ((unused))
-#endif
-
 static void dnet_usage(char *p)
 {
 	fprintf(stderr, "Usage: %s\n"
 			" -r addr:port:family  - adds a route to the given node\n"
 			" -W file              - write given file to the network storage\n"
-			" -s                   - request IO counter stats from node\n"
-			" -z                   - request VFS IO stats from node\n"
 			" -a                   - request stats from all connected nodes\n"
 			" -U status            - update server status: 1 - elliptics exits, 2 - goes RO\n"
 			" -R file              - read given file from the network into the local storage\n"
@@ -73,6 +67,8 @@ static void dnet_usage(char *p)
 			" -d request_string    - defragmentation request: 'start' - start defragmentation, 'status' - request current status\n"
 			" -i flags             - IO flags (see DNET_IO_FLAGS_* in include/elliptics/packet.h\n"
 			" -H                   - do not hash id, use it as is\n"
+			" -b backend_id        - operate with given backend ID, it is needed for defragmentation request or backend status update\n"
+			" -B status            - change backend status, possible options are: enable, disable, enable_write, disable_write, status (default)\n"
 			" -h                   - this help\n"
 			" ...                  - every parameter can be repeated multiple times, in this case the last one will be used\n"
 			, p);
@@ -94,7 +90,7 @@ static key create_id(unsigned char *id, const char *file_name)
 int main(int argc, char *argv[])
 {
 	int ch, err;
-	int io_counter_stat = 0, vfs_stat = 0, single_node_stat = 1;
+	int single_node_stat = 1;
 	struct dnet_node_status node_status;
 	int update_status = 0;
 	struct dnet_config cfg;
@@ -110,12 +106,14 @@ int main(int argc, char *argv[])
 	std::vector<int> groups;
 	uint64_t cflags = 0;
 	uint64_t ioflags = 0;
-	char *defrag = NULL;
+	char *defrag_status_str = NULL;
 	sigset_t mask;
 	char *ns = NULL;
 	int nsize = 0;
 	std::string as_is_key;
 	int exec_src_key = -1;
+	int backend_id = -1;
+	char *backend_status_str = NULL;
 
 	memset(&node_status, 0, sizeof(struct dnet_node_status));
 	memset(&cfg, 0, sizeof(struct dnet_config));
@@ -129,15 +127,15 @@ int main(int argc, char *argv[])
 	size = offset = 0;
 
 	cfg.wait_timeout = 60;
-	int log_level = DNET_LOG_ERROR;
+	dnet_log_level log_level = DNET_LOG_ERROR;
 
-	while ((ch = getopt(argc, argv, "i:d:C:A:f:F:M:N:g:u:O:S:m:zsU:aL:w:l:c:k:I:r:W:R:D:hH")) != -1) {
+	while ((ch = getopt(argc, argv, "i:d:C:A:f:F:M:N:g:u:O:S:m:zsU:aL:w:l:c:k:I:r:W:R:D:hHb:B:")) != -1) {
 		switch (ch) {
 			case 'i':
 				ioflags = strtoull(optarg, NULL, 0);
 				break;
 			case 'd':
-				defrag = optarg;
+				defrag_status_str = optarg;
 				break;
 			case 'C':
 				cflags = strtoull(optarg, NULL, 0);
@@ -150,7 +148,12 @@ int main(int argc, char *argv[])
 				update_status = 1;
 				break;
 			case 'M':
-				node_status.log_level = atoi(optarg);
+				try {
+					node_status.log_level = static_cast<uint32_t>(file_logger::parse_level(optarg));
+				} catch (std::exception &exc) {
+					std::cerr << "remote log level: " << exc.what() << std::endl;
+					return -1;
+				}
 				update_status = 1;
 				break;
 			case 'N':
@@ -167,17 +170,17 @@ int main(int argc, char *argv[])
 				size = strtoull(optarg, NULL, 0);
 				break;
 			case 'm':
-				log_level = atoi(optarg);
-				break;
-			case 's':
-				io_counter_stat = 1;
+				try {
+					log_level = file_logger::parse_level(optarg);
+				} catch (std::exception &exc) {
+					std::cerr << exc.what() << std::endl;
+					return -1;
+				}
+
 				break;
 			case 'U':
 				node_status.status_flags = strtol(optarg, NULL, 0);
 				update_status = 1;
-				break;
-			case 'z':
-				vfs_stat = 1;
 				break;
 			case 'a':
 				single_node_stat = 0;
@@ -231,6 +234,12 @@ int main(int argc, char *argv[])
 				as_is_key=read_data;
 				id=(unsigned char*)(as_is_key.c_str());
 				break;
+			case 'b':
+				backend_id = atoi(optarg);
+				break;
+			case 'B':
+				backend_status_str = optarg;
+				break;
 			case 'h':
 			default:
 				dnet_usage(argv[0]);
@@ -244,12 +253,12 @@ int main(int argc, char *argv[])
 		/*
 		 * Only request stats or start defrag on the single node
 		 */
-		if (single_node_stat && (vfs_stat || io_counter_stat || defrag)) {
+		if (single_node_stat && defrag_status_str) {
 			remote_flags = DNET_CFG_NO_ROUTE_LIST;
 			cfg.flags |= DNET_CFG_NO_ROUTE_LIST;
 		}
 
-		node n(log, cfg);
+		node n(logger(log, blackhole::log::attributes_t()), cfg);
 		session s(n);
 
 		s.set_cflags(cflags);
@@ -268,43 +277,80 @@ int main(int argc, char *argv[])
 			return -EINVAL;
 		}
 
-		err = dnet_add_state(n.get_native(), remote_addr, port, family, remote_flags);
-		if (err)
+		struct dnet_addr ra;
+
+		err = dnet_create_addr(&ra, remote_addr, port, family);
+		if (err) {
+			BH_LOG(n.get_log(), DNET_LOG_ERROR, "Failed to get address info for %s:%d, family: %d, err: %d: %s.",
+					remote_addr, port, family, err, strerror(-err));
+			return err;
+		}
+
+		err = dnet_add_state(n.get_native(), &ra, 1, remote_flags);
+		if (err < 0)
 			return err;
 
 		s.set_groups(groups);
 		s.set_namespace(ns, nsize);
 
-		if (defrag) {
-			struct dnet_defrag_ctl ctl;
-
-			memset(&ctl, 0, sizeof(struct dnet_defrag_ctl));
-
-			if (!strcmp(defrag, "status"))
-				ctl.flags = DNET_DEFRAG_FLAGS_STATUS;
-
-			err = dnet_start_defrag(s.get_native(), &ctl);
-
-			std::string str_status("Ok");
-
-			if (err < 0) {
-				str_status = strerror(-err);
-			} else {
-				if (!strcmp(defrag, "status")) {
-					if (err > 0)
-						str_status = "defragmentation is in progress";
-					else
-						str_status = "defragmentation is not running";
-				} else {
-					if (err == 0)
-						str_status = "started successfully";
-					else if (err > 0)
-						str_status = "unknown positive status";
-				}
+		if (defrag_status_str || backend_status_str) {
+			if (backend_id < 0) {
+				fprintf(stderr, "You must specify backend id (-b)\n");
+				return -EINVAL;
 			}
 
-			fprintf(stdout, "DEFRAG: %s: %s [%d]\n", defrag, str_status.c_str(), err);
-			return err;
+			std::string defrag_status, backend_status;
+			if (defrag_status_str)
+				defrag_status.assign(defrag_status_str);
+			else
+				backend_status.assign(backend_status_str);
+
+			session sess = s.clone();
+			sess.set_exceptions_policy(session::no_exceptions);
+
+			async_backend_status_result result;
+
+			if (defrag_status == "start") {
+				result = sess.start_defrag(ra, backend_id);
+			} else if ((defrag_status == "status") || (backend_status == "status")) {
+				result = sess.request_backends_status(ra);
+			} else if (backend_status == "enable") {
+				result = sess.enable_backend(ra, backend_id);
+			} else if (backend_status == "disable") {
+				result = sess.disable_backend(ra, backend_id);
+			} else if (backend_status == "enable_write") {
+				result = sess.make_writable(ra, backend_id);
+			} else if (backend_status == "disable_write") {
+				result = sess.make_readonly(ra, backend_id);
+			} else {
+				fprintf(stderr, "Invalid %s status '%s'\n", defrag_status_str ? "defrag" : "backend",
+						defrag_status_str ? defrag_status_str : backend_status_str);
+				return -EINVAL;
+			}
+
+			result.wait();
+
+			if (result.error())
+				std::cout << "result: " << result.error().message() << std::endl;
+
+			backend_status_result_entry entry = result.get_one();
+			if (entry.is_valid()) {
+				for (size_t i = 0; i < entry.count(); ++i) {
+					dnet_backend_status *status = entry.backend(i);
+					std::cout << "backend: " << status->backend_id << " at " << dnet_server_convert_dnet_addr(entry.address()) << std::endl;
+					std::cout << "  backend state: " << dnet_backend_state_string(status->state) << std::endl;
+					std::cout << "  defrag  state: " << dnet_backend_defrag_state_string(status->defrag_state) << std::endl;
+					if (dnet_time_is_empty(&status->last_start)) {
+						std::cout << "  backend has never been started" << std::endl;
+					} else {
+						std::cout << "  backend last start: " << dnet_print_time(&status->last_start) << ", err: " << status->last_start_err << std::endl;
+					}
+				}
+			} else {
+				std::cout << "status results are missed" << std::endl;
+			}
+
+			return result.error().code();
 		}
 
 		if (writef)
@@ -369,19 +415,13 @@ int main(int argc, char *argv[])
 					failed = true;
 				} else {
 					exec_context context = it->context();
-					if (log_level > DNET_LOG_DATA) {
-						if (context.is_null()) {
-							std::cout << dnet_server_convert_dnet_addr(it->address())
-								<< ": acknowledge" << std::endl;
-						} else {
-							std::cout << dnet_server_convert_dnet_addr(context.address())
-								<< ": " << context.event()
-								<< " \"" << context.data().to_string() << "\"" << std::endl;
-						}
+					if (context.is_null()) {
+						std::cout << dnet_server_convert_dnet_addr(it->address())
+							<< ": acknowledge" << std::endl;
 					} else {
-						if (!context.is_null()) {
-							std::cout << context.data().to_string() << std::endl;
-						}
+						std::cout << dnet_server_convert_dnet_addr(context.address())
+							<< ": " << context.event()
+							<< " \"" << context.data().to_string() << "\"" << std::endl;
 					}
 				}
 			}
@@ -403,66 +443,8 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (vfs_stat) {
-			float la[3];
-			auto results = s.stat_log();
-			for (auto it = results.begin(); it != results.end(); ++it) {
-				const stat_result_entry &result = *it;
-				dnet_cmd *cmd = result.command();
-				dnet_addr *addr = result.address();
-				dnet_stat *st = result.statistics();
-
-				la[0] = (float)st->la[0] / 100.0;
-				la[1] = (float)st->la[1] / 100.0;
-				la[2] = (float)st->la[2] / 100.0;
-
-				dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: la: %.2f %.2f %.2f.\n",
-						dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr),
-						la[0], la[1], la[2]);
-				dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: mem: "
-						"total: %llu kB, free: %llu kB, cache: %llu kB.\n",
-						dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr),
-						(unsigned long long)st->vm_total,
-						(unsigned long long)st->vm_free,
-						(unsigned long long)st->vm_cached);
-				dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: fs: "
-						"total: %llu mB, avail: %llu mB, files: %llu, fsid: 0x%llx.\n",
-						dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr),
-						(unsigned long long)(st->frsize * st->blocks / 1024 / 1024),
-						(unsigned long long)(st->bavail * st->bsize / 1024 / 1024),
-						(unsigned long long)st->files, (unsigned long long)st->fsid);
-			}
-		}
-
-		if (io_counter_stat) {
-			auto results = s.stat_log_count();
-			for (auto it = results.begin(); it != results.end(); ++it) {
-				const stat_count_result_entry &result = *it;
-				dnet_cmd *cmd = result.command();
-				dnet_addr *addr = result.address();
-				dnet_addr_stat *as = result.statistics();
-
-				for (int j = 0; j < (int)((cmd->size - sizeof(struct dnet_addr_stat)) / sizeof(struct dnet_stat_count)); ++j) {
-					if (j == 0)
-						dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: storage-to-storage commands\n",
-							dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr));
-					if (j == as->cmd_num)
-						dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: client-to-storage commands\n",
-							dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr));
-					if (j == as->cmd_num * 2)
-						dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s: Global stat counters\n",
-							dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr));
-
-					dnet_log_raw(n.get_native(), DNET_LOG_DATA, "%s: %s:    cmd: %s, count: %llu, err: %llu\n",
-							dnet_dump_id(&cmd->id), dnet_state_dump_addr_only(addr),
-							dnet_counter_string(j, as->cmd_num),
-							(unsigned long long)as->count[j].count, (unsigned long long)as->count[j].err);
-				}
-			}
-		}
-
 		if (update_status) {
-			s.update_status(remote_addr, port, family, &node_status);
+			s.update_status(address(remote_addr, port, family), &node_status);
 		}
 
 	} catch (const std::exception &e) {

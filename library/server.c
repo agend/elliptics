@@ -29,137 +29,10 @@
 #include "elliptics/interface.h"
 #include "monitor/monitor.h"
 
-static int dnet_ids_generate(struct dnet_node *n, const char *file, unsigned long long storage_free)
-{
-	int fd, err, size = 1024, i, num;
-	struct dnet_raw_id id;
-	struct dnet_raw_id raw;
-	unsigned long long q = 100 * 1024 * 1024 * 1024ULL;
-	char *buf;
-
-	srand(time(NULL) + (unsigned long)n + (unsigned long)file + (unsigned long)&buf);
-
-	fd = open(file, O_RDWR | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
-	if (fd < 0) {
-		err = -errno;
-		dnet_log_err(n, "failed to open/create ids file '%s'", file);
-		goto err_out_exit;
-	}
-
-	buf = malloc(size);
-	if (!buf) {
-		err = -ENOMEM;
-		goto err_out_close;
-	}
-	memset(buf, 0, size);
-
-	num = storage_free / q + 1;
-	for (i=0; i<num; ++i) {
-		int r = rand();
-		memcpy(buf, &r, sizeof(r));
-
-		dnet_transform_node(n, buf, size, id.id, sizeof(id.id));
-		memcpy(&raw, id.id, sizeof(struct dnet_raw_id));
-
-		err = write(fd, &raw, sizeof(struct dnet_raw_id));
-		if (err != sizeof(struct dnet_raw_id)) {
-			dnet_log_err(n, "failed to write id into ids file '%s'", file);
-			goto err_out_unlink;
-		}
-	}
-
-	free(buf);
-	close(fd);
-	return 0;
-
-err_out_unlink:
-	unlink(file);
-	free(buf);
-err_out_close:
-	close(fd);
-err_out_exit:
-	return err;
-}
-
-static struct dnet_raw_id *dnet_ids_init(struct dnet_node *n, const char *hdir, int *id_num, unsigned long long storage_free, struct dnet_addr *cfg_addrs, char* remotes)
-{
-	int fd, err, num;
-	const char *file = "ids";
-	char path[strlen(hdir) + 1 + strlen(file) + 1]; /* / + null-byte */
-	struct stat st;
-	struct dnet_raw_id *ids;
-
-	snprintf(path, sizeof(path), "%s/%s", hdir, file);
-
-again:
-	fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) {
-		err = -errno;
-		if (err == -ENOENT) {
-			if (n->flags & DNET_CFG_KEEPS_IDS_IN_CLUSTER)
-				err = dnet_ids_update(1, path, cfg_addrs, remotes);
-			if (err)
-				err = dnet_ids_generate(n, path, storage_free);
-
-			if (err)
-				goto err_out_exit;
-
-			goto again;
-		}
-
-		dnet_log_err(n, "failed to open ids file '%s'", path);
-		goto err_out_exit;
-	}
-
-	err = fstat(fd, &st);
-	if (err)
-		goto err_out_close;
-
-	if (st.st_size % sizeof(struct dnet_raw_id)) {
-		dnet_log(n, DNET_LOG_ERROR, "Ids file size (%lu) is wrong, must be modulo of raw ID size (%zu).\n",
-				(unsigned long)st.st_size, sizeof(struct dnet_raw_id));
-		goto err_out_close;
-	}
-
-	num = st.st_size / sizeof(struct dnet_raw_id);
-	if (!num) {
-		dnet_log(n, DNET_LOG_ERROR, "No ids read, exiting.\n");
-		err = -EINVAL;
-		goto err_out_close;
-	}
-
-	if (n->flags & DNET_CFG_KEEPS_IDS_IN_CLUSTER)
-		dnet_ids_update(0, path, cfg_addrs, remotes);
-
-	ids = malloc(st.st_size);
-	if (!ids) {
-		err = -ENOMEM;
-		goto err_out_close;
-	}
-
-	err = read(fd, ids, st.st_size);
-	if (err != st.st_size) {
-		err = -errno;
-		dnet_log_err(n, "Failed to read ids file '%s'", path);
-		goto err_out_free;
-	}
-
-	close(fd);
-
-	*id_num = num;
-	return ids;
-
-err_out_free:
-	free(ids);
-err_out_close:
-	close(fd);
-err_out_exit:
-	return NULL;
-}
-
 static int dnet_node_check_stack(struct dnet_node *n)
 {
 	size_t stack_size;
+	size_t min_stack_size = 1024 * 1024;
 	int err;
 
 	err = pthread_attr_getstacksize(&n->attr, &stack_size);
@@ -169,13 +42,14 @@ static int dnet_node_check_stack(struct dnet_node *n)
 		goto err_out_exit;
 	}
 
-	if (stack_size <= 1024 * 1024) {
-		dnet_log(n, DNET_LOG_ERROR, "Stack size (%zd bytes) is too small, exiting\n", stack_size);
+	if (stack_size < min_stack_size) {
+		dnet_log(n, DNET_LOG_ERROR, "Stack size (%zd bytes) is too small, should be at least %zd, exiting",
+				stack_size, min_stack_size);
 		err = -ENOMEM;
 		goto err_out_exit;
 	}
 
-	dnet_log(n, DNET_LOG_NOTICE, "Stack size: %zd bytes\n", stack_size);
+	dnet_log(n, DNET_LOG_NOTICE, "Stack size: %zd bytes", stack_size);
 
 err_out_exit:
 	return err;
@@ -205,44 +79,9 @@ err_out_exit:
 	return err;
 }
 
-static const char* dnet_backend_stat_json(void *priv)
-{
-	struct dnet_backend_callbacks* cb = (struct dnet_backend_callbacks*) priv;
-
-	char* json_stat;
-	size_t size;
-
-	cb->storage_stat_json(cb->command_private, &json_stat, &size);
-	return json_stat;
-}
-
-static void dnet_backend_stat_stop(void *priv)
-{
-	(void) priv;
-}
-
-static int dnet_backend_stat_check_category(void *priv, int category)
-{
-	(void) priv;
-	return category == DNET_MONITOR_BACKEND || category == DNET_MONITOR_ALL;
-}
-
-static int dnet_backend_stat_provider_init(struct dnet_node *n)
-{
-	struct stat_provider_raw stat_provider;
-	stat_provider.stat_private = n->cb;
-	stat_provider.json = &dnet_backend_stat_json;
-	stat_provider.stop = &dnet_backend_stat_stop;
-	stat_provider.check_category = &dnet_backend_stat_check_category;
-	dnet_monitor_add_provider(n, stat_provider, "backend");
-	return 0;
-}
-
 struct dnet_node *dnet_server_node_create(struct dnet_config_data *cfg_data)
 {
 	struct dnet_node *n;
-	struct dnet_raw_id *ids = NULL;
-	int id_num = 0;
 	struct dnet_config *cfg = &cfg_data->cfg_state;
 	struct dnet_addr *addrs = cfg_data->cfg_addrs;
 	int addr_num = cfg_data->cfg_addr_num;
@@ -263,12 +102,13 @@ struct dnet_node *dnet_server_node_create(struct dnet_config_data *cfg_data)
 
 	n->config_data = cfg_data;
 
-	err = dnet_monitor_init(&n->monitor, cfg);
+	err = dnet_server_io_init(n);
 	if (err)
 		goto err_out_node_destroy;
 
-	dnet_monitor_init_io_stat_provider(n);
-	dnet_monitor_init_react_stat_provider(n);
+	err = dnet_monitor_init(n, cfg);
+	if (err)
+		goto err_out_node_destroy;
 
 	err = dnet_node_check_stack(n);
 	if (err)
@@ -281,84 +121,93 @@ struct dnet_node *dnet_server_node_create(struct dnet_config_data *cfg_data)
 		if (err)
 			goto err_out_monitor_destroy;
 
-		dnet_log(n, DNET_LOG_NOTICE, "No notify hash size provided, using default %d.\n",
+		dnet_log(n, DNET_LOG_NOTICE, "No notify hash size provided, using default %d.",
 				n->notify_hash_size);
 	}
 
-	err = dnet_backend_stat_provider_init(n);
+	err = dnet_local_addr_add(n, addrs, addr_num);
 	if (err)
 		goto err_out_notify_exit;
 
-	err = dnet_cache_init(n);
-	if (err)
-		goto err_out_backend_stat_provider_exit;
-
-	err = dnet_local_addr_add(n, addrs, addr_num);
-	if (err)
-		goto err_out_cache_cleanup;
-
 	if (cfg->flags & DNET_CFG_JOIN_NETWORK) {
-		struct dnet_addr la;
 		int s;
+		struct dnet_addr la;
 
 		err = dnet_locks_init(n, 1024);
-		if (err)
+		if (err) {
+			dnet_log(n, DNET_LOG_ERROR, "failed to init locks: %s %d", strerror(-err), err);
 			goto err_out_addr_cleanup;
+		}
 
-		ids = dnet_ids_init(n, cfg->history_env, &id_num, cfg->storage_free, cfg_data->cfg_addrs, cfg_data->cfg_remotes);
-		if (!ids)
+		n->route = dnet_route_list_create(n);
+		if (!n->route) {
+			dnet_log(n, DNET_LOG_ERROR, "failed to create route list: %s %d", strerror(-err), err);
 			goto err_out_locks_destroy;
+		}
 
-		memset(&la, 0, sizeof(struct dnet_addr));
-		la.addr_len = sizeof(la.addr);
-		la.family = cfg->family;
+		err = dnet_create_addr(&la, NULL, cfg->port, cfg->family);
+		if (err < 0) {
+			dnet_log(n, DNET_LOG_ERROR, "Failed to get address info for 0.0.0.0:%d, family: %d, err: %d: %s.",
+				cfg->port, cfg->family, err, strerror(-err));
+			goto err_out_route_list_destroy;
+		}
 
-		err = dnet_socket_create(n, NULL, cfg->port, &la, 1);
+		err = dnet_socket_create_listening(n, &la);
 		if (err < 0)
-			goto err_out_ids_cleanup;
+			goto err_out_route_list_destroy;
 
 		s = err;
-		dnet_setup_id(&n->id, cfg->group_id, ids[0].id);
 
-		n->st = dnet_state_create(n, cfg->group_id, ids, id_num, &la, s, &err, DNET_JOIN, -1, dnet_state_accept_process);
+		if (s < 0) {
+			err = s;
+			dnet_log(n, DNET_LOG_ERROR, "failed to create socket: %s %d", strerror(-err), err);
+			goto err_out_route_list_destroy;
+		}
+
+		n->st = dnet_state_create(n, NULL, 0, n->addrs, s, &err, DNET_JOIN, 1, 0, 1, n->addrs, n->addr_num);
+
 		if (!n->st) {
+			dnet_log(n, DNET_LOG_ERROR, "failed to create state: %s %d", strerror(-err), err);
 			goto err_out_state_destroy;
 		}
 
-		free(ids);
-		ids = NULL;
+		err = dnet_backend_init_all(n);
+		if (err) {
+			dnet_log(n, DNET_LOG_ERROR, "failed to init backends: %s %d", strerror(-err), err);
+			goto err_out_state_destroy;
+		}
 
 		if (!cfg->srw.config) {
-			dnet_log(n, DNET_LOG_INFO, "srw: no config\n");
+			dnet_log(n, DNET_LOG_INFO, "srw: no config");
 			n->srw = NULL;
 		} else {
 			err = dnet_srw_init(n, cfg);
 			if (err) {
-				dnet_log(n, DNET_LOG_ERROR, "srw: initialization failure: %s %d\n", strerror(-err), err);
-				goto err_out_state_destroy;
+				dnet_log(n, DNET_LOG_ERROR, "srw: initialization failure: %s %d", strerror(-err), err);
+				goto err_out_backends_cleanup;
 			}
 		}
 	}
 
-	dnet_log(n, DNET_LOG_DEBUG, "New server node has been created at port %d, ids: %d.\n", cfg->port, id_num);
+	dnet_log(n, DNET_LOG_DEBUG, "New server node has been created at port %d.", cfg->port);
 
 	pthread_sigmask(SIG_SETMASK, &previous_sigset, NULL);
 	return n;
 
 	dnet_srw_cleanup(n);
+err_out_backends_cleanup:
+	dnet_set_need_exit(n);
+	dnet_backend_cleanup_all(n);
 err_out_state_destroy:
 	dnet_state_put(n->st);
-err_out_ids_cleanup:
-	free(ids);
+err_out_route_list_destroy:
+	dnet_route_list_destroy(n->route);
 err_out_locks_destroy:
 	dnet_locks_destroy(n);
 err_out_addr_cleanup:
 	dnet_local_addr_cleanup(n);
-err_out_cache_cleanup:
-	n->need_exit = err;
-	dnet_cache_cleanup(n);
-err_out_backend_stat_provider_exit:
 err_out_notify_exit:
+	n->need_exit = err;
 	dnet_notify_exit(n);
 err_out_monitor_destroy:
 	dnet_monitor_exit(n);
@@ -371,7 +220,7 @@ err_out_exit:
 
 void dnet_server_node_destroy(struct dnet_node *n)
 {
-	dnet_log(n, DNET_LOG_DEBUG, "Destroying server node.\n");
+	dnet_log(n, DNET_LOG_DEBUG, "Destroying server node.");
 
 	/*
 	 * Cache can be accessed from the io threads, so firstly stop them.
@@ -382,14 +231,12 @@ void dnet_server_node_destroy(struct dnet_node *n)
 	 */
 	dnet_node_cleanup_common_resources(n);
 
+	dnet_route_list_destroy(n->route);
+	n->route = NULL;
+
+	dnet_backend_cleanup_all(n);
+
 	dnet_srw_cleanup(n);
-	dnet_cache_cleanup(n);
-
-	if (n->cache_pages_proportions)
-		free(n->cache_pages_proportions);
-
-	if (n->cb && n->cb->backend_cleanup)
-		n->cb->backend_cleanup(n->cb->command_private);
 
 	dnet_counter_destroy(n);
 	dnet_locks_destroy(n);

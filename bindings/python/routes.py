@@ -27,11 +27,10 @@ def percentage(routes):
     from operator import itemgetter
     percentages = routes.percentages()
     for group in percentages:
-        print 'Group: {0}'.format(group)
-        items = percentages[group].items()
-        items.sort(key=itemgetter(1))
-        for host, percent in items:
-            print 'host {0} {1:.2f}'.format(host, percent)
+        print 'Group {0}:'.format(group)
+        for host in percentages[group]:
+            for backend_id in percentages[group][host]:
+                print '\thost {0}/{1}\t{2:.2f}'.format(host, backend_id, percentages[group][host][backend_id])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get remote route table and print its statistics.')
@@ -41,7 +40,7 @@ if __name__ == '__main__':
         help='if present, dump parts of DHT ring each node occupies (in percents)')
     parser.add_argument('--log', default='/dev/stdout', help='log file')
     parser.add_argument('--log-level', type=int, default=elliptics.log_level.error,
-        help='log level: %d-%d' % (elliptics.log_level.data, elliptics.log_level.debug))
+        help='log level: %d-%d' % (elliptics.log_level.error, elliptics.log_level.debug))
 
     args = parser.parse_args()
     if len(args.remotes) == 0:
@@ -52,14 +51,12 @@ if __name__ == '__main__':
     s = elliptics.Session(n)
 
     try:
-        for r in args.remotes:
-            n.add_remote(r)
+        n.add_remotes(args.remotes)
     except Exception as e:
         print e
         pass
 
-    routes = s.get_routes()
     if args.percentage:
-        percentage(routes)
+        percentage(s.routes)
     else:
-        print routes
+        print s.routes

@@ -3,7 +3,8 @@
 
 Summary:	Distributed hash table storage
 Name:		elliptics
-Version:	2.25.4.16
+
+Version:	2.26.3.26
 Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
@@ -15,10 +16,11 @@ BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	python-devel
 BuildRequires:	libcocaine-core2-devel >= 0.11.2.0
 BuildRequires:  cocaine-framework-native-devel >= 0.11.0.0
-BuildRequires:	eblob-devel >= 0.21.40
+BuildRequires:	eblob-devel >= 0.22.6
 BuildRequires:	react-devel >= 2.3.1
+BuildRequires:  libblackhole-devel >= 0.2.0-2
 BuildRequires:	libev-devel libtool-ltdl-devel
-BuildRequires:	cmake msgpack-devel libblackhole-devel python-msgpack
+BuildRequires:	cmake msgpack-devel python-msgpack
 
 %define boost_ver %{nil}
 
@@ -66,6 +68,7 @@ cocaine-plugin-elliptics
 Summary:	Elliptics library C++ binding development headers and libraries
 Group:		Development/Libraries
 Requires:	%{name} = %{version}-%{release}
+Requires:   libblackhole-devel >= 0.2.0
 
 
 %description client-devel
@@ -119,14 +122,13 @@ rm -rf %{buildroot}
 %{_bindir}/dnet_find
 %{_bindir}/dnet_ioclient
 %{_bindir}/dnet_index
-%{_bindir}/dnet_stat
 %{_bindir}/dnet_notify
 %{_bindir}/dnet_ids
 %{_bindir}/dnet_balancer
 %{_bindir}/dnet_recovery
+%{_bindir}/dnet_client
 %{_libdir}/libelliptics_client.so.*
 %{_libdir}/libelliptics_cpp.so.*
-%{_libdir}/libelliptics_monitor.so.*
 %{python_sitelib}/elliptics/core.so.*
 %{python_sitelib}/elliptics_recovery/*
 %{python_sitelib}/elliptics/*.py*
@@ -136,13 +138,388 @@ rm -rf %{buildroot}
 %defattr(-,root,root,-)
 %{_includedir}/*
 %{_libdir}/libelliptics_client.so
-%{_libdir}/libelliptics_monitor.so
 %{_libdir}/libelliptics_cpp.so
 %{_datadir}/elliptics/cmake/*
 %{python_sitelib}/elliptics/core.so
 
 
 %changelog
+* Sun Sep 28 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.26
+- net: put state in dnet_connect_route_list_complete
+- connect: add_remote() must always return error when failed to connect to any remote node
+- fs: set default directory-bit-numnber to 16, otherwise backend doesn't work if appropriate config option is not specified
+- balancer: print correct message if remote hasn't been specified
+- pytest: more comments
+- Pytest: set tests timeout to 300 sec
+- Pytests: added test for recovering corrupted data
+- Recovery: removed duplicates from list of groups with outdated data. Fixed crash after failed iteration.
+- Recovery: changed default logging level for dnet_recovery
+- Backends: added new backend state: DNET_BACKEND_UNITIALIZED for backends that have not been specified in config file.
+- 	Do not include status of unitialized backends to monitor statistics and backends status of unitialized backends to monitor statistics and backends status response.
+- Core: do not recalculate state weight after commands without data
+
+* Thu Sep 18 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.25
+- net: setup state epoll_fd before sending AUTH
+- Python: added comments to route.py
+- Python: speeded up elliptics.RouteList initialization
+
+* Thu Sep 18 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.24
+- route: fixed deadlock in routes.cpp
+- Block dependency from next major version of elliptics
+- stats: provide backend directly from cmd processing, do not try to find it using cmd->backend_id
+- session: roughly exit on 'impossible' condition
+- stat: do not dereference incorrect (negative or too large) backend_id
+- route: Reset state if JOIN fails by any reason	b0a8c47
+- library: Use copy addresses at state_move_to_dht
+- Build-Deps: blackhole-dev (>= 0.2.1-1)
+- find: Add backend_id to dnet_find output
+
+* Tue Sep 16 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.23
+- stats: implemented per-backend command counters
+- log: returned back extended io command log
+- stats: only print commands which have non-zero counters
+- ioclient: added options to change backend status (enable, disable, ro, writable)
+- cache: slru destruction debug
+- stats: get rid of histograms
+
+* Wed Sep 10 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.22
+- net: Surround state->node_entry changes by state_lock
+
+* Wed Sep 10 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.21
+- net: Use list_splice_init correctly
+- monitor: compress returned data via both http and elliptics protocols
+
+* Tue Sep 09 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.20
+- monitor: compress every possible json reply from server to client including error jsons
+- monitor: static function in headers must be inlined
+- net: Fixed race condition of route-list counter
+- net: Fixed parsing of route list for dual stack
+- server: Set not-null address for accepting state
+- net: Fixed debug output for route lists
+- library: Added session::request_single_cmd
+- trans: Fixed trans_id at transactions' destruction
+
+* Tue Sep 02 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.19
+- Pytest: added checking requesting all categories.
+- monitor: add 'group' to 'backend->config' only if it was requested
+
+* Tue Sep 02 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.18
+- reconnect: always add address into reconnection queue until it is EEXIST, ENOMEM or EBADF error
+
+* Tue Sep 02 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.17
+- Python: fixed make_writable
+
+* Tue Sep 02 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.16
+- monitor: restored 'group' at 'backend->config'
+- python: added make_readonly and make_writable to elliptics.Session
+- monitor: removed commands history
+
+* Wed Aug 27 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.15
+- elliptics: Fixed handler::total at several places
+- monitor: forced deflate of the transmitted json
+- recovery: now if dc couldn't read the newer version of the key - it skips it and use next one by timestamp and so on
+- Monitor: moved config of disabled backend to 'backend->config'
+- Pytest: marked each test case by unique trace_id
+- Pytests: added monitor statistics to log
+- monitor: now monitor listen the same net family as the node does
+- merge recovery: added user-friendly log when group has only one node with one backend
+- tools: added '-n/--check_nodes' option to dnet_balancer for printing only nodes spread without route-list
+- Python: completely removed old interface elliptics.Session.get_routes and used new elliptics.Session.routes wherever needed
+- package: depend on blackhole 0.2.0-2 and higher
+
+* Tue Aug 26 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.14
+- server: Fixed io queue limits
+- client: Throw -EPROTO if we connected to wrong addr
+- client: Fixed checkers at merge_indexes
+- client: Recover files on read also for -EILSEQ
+- client: Don't lose trace_id at timeout
+
+* Mon Aug 25 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.13
+- session: implemented bulk_remove() method
+- tests: since timeouts are now long, fix its overflow test
+- config: fixed misleading config error exception message
+- timeouts: all timeouts are long
+- config: only try to add new nodes if remotes() vector contains some addresses
+- trans: extended timeout transaction log
+- client: Explicitly link with boost-system
+- package: depend on blackhole 0.2.0-0rc10
+
+* Fri Aug 22 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.12
+- Logs: removed '\n' from the end of logs - blackhole adds '\n'
+- example: Added backend_id to example config
+- balancer: changed usage removed spread by percentages
+- server: Don't check for forward if direct request
+- backends: Write duration of backend's init
+- backends: set correct error if missed backend_id
+- Monitor: wrapped json generation by try/catch
+- backends: Make unique log for every backend
+- node: EEXIST for state is 'good' error
+
+* Thu Aug 21 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.11
+- Logger: Write logs in local time
+
+* Thu Aug 21 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.10
+- Python: removed using of dropped elliptics.log_level.data
+- Log: fixed typo and fixed spaces
+- backends: Added mandatory field backend_id
+
+* Wed Aug 20 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.9
+- dnet_client: Fixed default log level
+- server: Add backend_id to every log at io pool
+
+* Wed Aug 20 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.8
+- logger: Log io/c/indexes/cfg flags with names
+- node: Print cfg flags on start
+
+* Wed Aug 20 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.7
+- client: Added ability to construct session from dnet_node
+- server: Make possible to send request yourself
+- cocaine: added read_latest to elliptics service
+- server: Added option.parallel option
+- dnet_client: Return non-zero code on fail
+- thread: Changed name pattern for threads
+
+* Tue Aug 19 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.6
+- backend: Read config at backend's start
+- logger: Removed useless premature optimization
+
+* Tue Aug 19 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.5
+- logger: do not even try to process logging if log level is small enough
+
+* Mon Aug 18 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.4
+- Get rid of foreign/blackhole include dir which can contain old/obscure version of the package
+
+* Mon Aug 18 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.3
+- Rebuild with the proper blackhole-dev package
+
+* Sun Aug 17 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.2
+- state: minor cleanups, optimizations and fixes
+- stack: print minimum stack size (1M) if current stack size is less than that
+
+* Fri Aug 15 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.1
+- monitor: stat fixes
+- backends: added ability to make backends readonly
+- monitor: added config stats
+
+* Thu Aug 14 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.3.0
+- cache: Added ability to configure backend's cache
+- client: Added send_to_each_node
+- client: Drop direct_backend flag at set_direct_id
+- client: monitor_stat should accept address, not id
+- config: Make possible to set io thread num per backend
+- config: options.*_thread_num is required field
+- example: Removed out-to-dated ioserv.conf
+- logger: Don't print destruction packets
+- Monitor: Added 'procfs' stats that includes 'vm', 'io' and 'stat'
+- monitor&statistics: moved stat_log and stat_log_count statistics to monitoring statistics
+- Python: fixed lookup_address and doc strings
+- Python: removed session.get_routes()
+- Python: removed session.update_status by elliptics.Id
+- Python: replaced elliptics.Id by elliptics.Address at session.monitor_stat
+
+* Mon Aug 11 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.2.0
+- API: Changed signature of "complete" methods
+- backends: Make possible to start several backends per time
+- cache: Don't send 2 packets as lookup reply
+- callback: Write to log about each processed packet
+- client: Added optimization for key's transformation
+- client: Added parallel_lookup
+- client: Added quorum_lookup
+- client: Moved read/write_file logic to c++ binding
+- client: Refactored implemenation of handling replies from server
+- client: Removed unused client's methods
+- client: Returned error from add_state with more sense
+- cpp: data_buffer should consider size of counter
+- dnet_balancer: fixed error exit when one of real route matches with 00..0 or ff..f
+- eblob: Fixed log levels between eblob & elliptics
+- Monitor: reorganized monitor statistics from different backends
+- protocol: Changed DNET_TRANS_REPLY to DNET_FLAGS_REPLY
+- Pytests: added prepare/plain/commit test when it rewrites key from closed blob by bigger data
+- Recovery: wrapped os.rename by try/except for catching os.rename exception
+- run_servers: added generating monitor section in ioserv config
+- run_servers: Write pid of dnet_ioserv's to log
+- tests: Added 3 more tests about lookup results
+- tests: Generate random trace_id for each test case
+- weights: increase temporal selection-only (not state) weights (multiply by 10 on each step) until they sum up into large enough number for random selection
+
+* Mon Aug 04 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.1.1
+- logger: Use blackhole's level's formatter
+- server: Connect to remotes asynchronously
+- net: Fixed race at converting node to server one
+
+* Mon Aug 04 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.1.0
+- Python: implemented elliptics.Node.add_remotes which has replaced old elliptics.Node.add_remote
+- Pytests: added waiting for appearance enabled backends in route list at test_recovery
+- Tools: fixed dnet_recovery
+- cocaine: Connect to all remotes simultaneously
+- indexes: Fixed shard id & count values in secondary indexes
+- backends: Added more logs about init/cleanup
+- net: Fixed connection to server with big ids files
+
+* Sun Aug 03 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.0.4
+- library: Fixed race of creating dht states
+- 
+
+* Sun Aug 03 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.0.3
+- route: Add states after join_request to dht_list
+- library: Added really asynchonous add_remote_state
+- library: Reimplemented reconnection thread
+- * Now it makes reconnection and route list requests simultaneously, which gradually decreasis time of this operations with low-latency network
+- net: Removed autodiscovery support
+- 
+
+* Fri Aug 01 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.0.2
+- Fixed version
+
+* Fri Aug 01 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 0.6.0.2
+- client: Added is_final field to result_entry
+- client: Added new filters for entry::is_final
+- client: Fixed bulk operations
+- client: Fixed time formatting in file_logger
+- dnet_client: Long live, dnet_client
+- indexes: Fixed set_indexes in multibackend systems
+- linking: Fixed linking errors at Fedora 20 and Ubuntu Lucid
+- logger: Updated for blackhole-0.2.0-0rc2
+- Monitor: made monitor section in config for dnet_ioserv and added new history_length and call_tree_timeout to the section.
+- pytests: Fixed test for existen filters
+- python: Fixed signature of Logger.log
+- server: Do not kill own state because of timeout
+
+* Wed Jul 30 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.0.1
+- config: Moved to usage of dynamic_t
+- logger: Fixed segfault
+- srw: Really, don't send exec to every backend
+- protocol: Moved trace_id to dnet_cmd from dnet_id
+- * Added trace_bit as command flag instead of special trace_id's bit
+
+* Tue Jul 29 2014 Ruslan Nigmatullin <euroelessar@yandex.ru> - 2.26.0.0
+- backends: Ability not to enable backends at start
+- backends: Added ability to change backend's ids
+- backends: Added API for enable/disable/status backends
+- backends: Added defrag API, added fields to status
+- backends: Added DNET_CMD_CONTROL_BACKEND command to enable and disable backends
+- backends: Added field to know current defrag state, added fields to know about
+- backends: Generate ids from /dev/urandom
+- backends: Only return defrag_state if possible
+- backends: Set direct flag for control and status
+- backends: Store current backends' states
+- client: Added node::from_raw API
+- client: Changed ger_routes signature
+- client: Introduced address structure
+- Core: made update_status used address for addressing to node.
+- Eblob: removed iterate_thread_num specification at eblob_backend.
+- elliptics: Added multi-backend support in route lists
+- ioclient: Moved to new defrag API
+- logger: Moved to Blackhole as logging system
+- logger: changed trace_id output to hex.
+- monitor: added raw function for removing statistics provider by name. Removed duplicated code.
+- monitor: Link with elliptics_client
+- node: Fixed more conflicts
+- pool: Introduce thread-local queue
+- pool: Make io-thread init log more verbose
+- Pytest: Added tesing dnet_recovery with all modes.
+- Pytest: Added parameters for specifying number of nodes and number of backends that should be run in test cluster.
+- Python: Added new interface for supporting multibackends. Used elliptics.Address where it can be used and removed duplicating interfaces. Added new abilities to elliptics.RouteList for working with backend_id.
+- Python: Added support backend_id to route list.
+- Python: Fixed dnet_balancer and for working with new multibackends route list.
+- Python: Removed group_id from elliptics.
+- Recovery: made dnet_recovery works with new multibackends route list. Added ability to specifies backend_id (via '-i') when dnet_recovery runs for one node ('--one-node')
+- routelist: Added support for DNET_CMD_UPDATE_IDS
+- routelist: Don't send ack for route-list request
+- routelist: Send only addresses at route tables
+- run_servers: Added 'backends' option support
+- server: Removed node::id
+- server: Separated backend to external structure
+- statistics: Added ability to remove providers
+- tests: Added sleep in recovery test
+- tests: Added test for backend's control
+- tests: Apps should write logs to different files
+
+* Thu Jul 28 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.6.4
+- reconnect: reconnect to addresses which were timed out during connection
+
+* Thu Jul 28 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.6.3
+- recv: do not dereference data stored in state, since to that moment it can be overwritten by the next command from the same client(socket)
+- route: let regular route table update also get route table from nodes explicitly added via dnet_add_state() and helpers
+- state: print error if no state has been found for given ID
+- version: added check/read functions
+
+* Thu Jul 24 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.6.2
+- weight: print full weight change, not only first 3 digits
+- Logs: changed trace_id output to hex
+
+* Wed Jul 23 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.6.1
+- state: when (re)creating state after recevied reverse lookup we must copy received address array into this new state
+- route: cleaned up debug messages
+- trans: cache transaction reply flags to make processing bulletproof against callback which can change cmd->flags
+
+* Tue Jul 22 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.6.0
+- package: depend on 0.22.0+ eblob which provides range iterators
+- iterate: output more useful info about iterated keys
+- iterate: added option to parse dnet_balance output file and select ranges which DO NOT belong to selected node and request those ranges from remote node
+- dnet_add_state: if we failed to add any remote addr because they already exist in the route table, return 0 to indicate success
+- iterator: switched to new iterator scheme where ranges and ctl structure are provided directly into backend. Eblob uses this data to skip ranges in indexes if they are sorted.Eblob: removed iterate_thread_num specification at eblob_backend.
+- cmake: install timer.hpp with other headers
+- tests: stop after the first test failure
+
+* Fri Jul 18 2014 Kirill Smorodinnikov <shaitkir@gmail.com> - 2.25.5.1
+- Recovery: fixed merge index mismatch if some of merging shards have unfilled shard_id and shard_count
+- Pytests: turned on exit on first fail to make it easer to find the problem. Used separated log files for all node and client
+- IOClient: fixed checking dnet_add_state result
+
+* Sun Jul 13 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.5.0
+- Let's use Travis-CI to check every commit
+- route: new batch request completion logic
+- Pytests: added group_id check in result entries
+- Added batch connect/listen mechanism
+- addr: switched C API to dnet_addr structure
+- There is no required() at boost::program_options on lucid
+
+* Wed Jul 09 2014 Kirill Smorodinnikov <shaitkir@gmail.com> - 2.25.4.21
+- Python: fixed address group_id in result entries.
+- srw-test: fixed signed-unsigned warning
+- tests: cleaned up srw timeout test: removed misleading debug output when everything is ok, voided unused variable
+- config: removed comment about unused 'do-not-update-metadata' flag
+- srw: use full namespace name for ioremap::elliptics::lexical_cast() function
+- indexes: Handle failed parsed indexes metadata from msgpack …
+- index_perf: added index performance tool
+- utils: moved common functions to utils header
+- timer: added elapsed timer
+- srw-test: moved thread-watchdog class outside timeout test function for older compilers happiness
+
+* Fri Jun 27 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.20
+- trans: ascending transaction number order instead of descending
+- trans: new timeout transaction completion logic
+
+* Tue Jun 24 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.19
+- Pytests: fixed test_session_indexes - wait set_indexes/remove_indexes results
+- submodule: removed react, started to use git:// instead of http://
+
+* Mon Jun 23 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.18
+- Core: Added unmapping IPv4 from mapped IPv6 address
+- client: Added session::recovery_index method
+- client: Introduced merge_indexes method
+- tests: Docs for test_index_metadata added
+- index: More docs for get_index_metadata helper function
+- 
+
+* Wed Jun 18 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.17
+- Pytests: added testing of index interface: set/update/remove
+- Recovery: Added dumping iterated keys to dump file(s) that could be used for resuming recovery after some issues
+- Recovery: Fixed splitting ranges in small pieces for merging them in different processes.
+-     Replaced pickle with CPickle
+-     fixed 'zero length field name in format' bug on Python2.6
+-     Added traceback print to exception log
+- Python: used one argument for id and context at exec_, made src_key last argument
+- Core: fixed hanging up iteration on cond_wait.
+-     There was race condition: after successful dnet_send_reply another thread removes the state and before original thread stucks on waiting condition variable.
+-     After that no one thread will wake up original thread via broadcasting conditional variable
+- Documentation: added docs how merge works with -f/--dump-file
+- Recovery: fixed stats group name in merge. Show all key at read/write/merge/remove failures. Fixed exit code in dc.
+- Recovery: Added merge recovering the list of keys from dump file
+- Monitor: clear m_cmd_info_current after swap
+- Recovery: Enabled -r reusable (so you can specify several remotes). -o should be followed by adress of node that should be processed
+
 * Fri Jun 06 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.25.4.16
 - spec: do not require boost libraries, they will be populated from devel package version
 - debian: do not install libelliptics_cocaine.so.*, it is being built statically now

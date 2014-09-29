@@ -44,7 +44,6 @@ include(FixRpath)
 create_stdint(${CMAKE_CURRENT_SOURCE_DIR}/include/elliptics/typedefs.h)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/foreign/blackhole/src)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/monitor)
 
 # Set id_size
@@ -89,6 +88,7 @@ include_directories(${EBLOB_INCLUDE_DIRS})
 
 if (HAVE_MODULE_BACKEND_SUPPORT)
     add_definitions(-DHAVE_MODULE_BACKEND_SUPPORT=1)
+    add_subdirectory(example/module_backend)
 endif()
 
 # Find react
@@ -105,7 +105,7 @@ if(WITH_DOXYGEN)
 endif()
 
 # GoLD does no overlinking
-find_package(Boost REQUIRED COMPONENTS thread system)
+find_package(Boost REQUIRED COMPONENTS iostreams thread regex program_options system filesystem)
 message(STATUS "Boost information:")
 message(STATUS "  Boost_INCLUDE_DIRS: ${Boost_INCLUDE_DIRS}")
 message(STATUS "  Boost_LIBRARY_DIRS: ${Boost_LIBRARY_DIRS}")
@@ -148,11 +148,13 @@ install(FILES
         include/elliptics/error.hpp
         include/elliptics/result_entry.hpp
         include/elliptics/session.hpp
+        include/elliptics/timer.hpp
         include/elliptics/utils.hpp
         include/elliptics/backends.h
         ${CMAKE_CURRENT_SOURCE_DIR}/include/elliptics/typedefs.h
         include/elliptics/module_backend.h
         include/elliptics/module_backend.hpp
+        include/elliptics/logger.hpp
         DESTINATION include/elliptics/
         )
 

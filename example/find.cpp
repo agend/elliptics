@@ -48,25 +48,8 @@ class finder : public session {
 		finder(node &n) : session(n) {}
 		virtual ~finder() {}
 
-		void add_remote(char *addr);
-
 		void parse_lookup(const sync_generic_result &ret);
 };
-
-void finder::add_remote(char *addr)
-{
-	int remote_port, remote_family;
-	int err;
-
-	err = dnet_parse_addr(addr, &remote_port, &remote_family);
-	if (err < 0) {
-		std::ostringstream str;
-		str << "Failed to parse addr: " << addr;
-		throw std::runtime_error(str.str());
-	}
-
-    get_node().add_remote(addr, remote_port, remote_family);
-}
 
 void finder::parse_lookup(const sync_generic_result &ret)
 {
@@ -77,6 +60,7 @@ void finder::parse_lookup(const sync_generic_result &ret)
 		if (data.size()) {
 			struct dnet_file_info *info = NULL;
 			char addr_str[128] = "no-address";
+			int backend_id = cmd->backend_id;
 
 			if (data.size() >= sizeof(struct dnet_addr)) {
 				struct dnet_addr *addr = data.data<struct dnet_addr>();
@@ -93,13 +77,24 @@ void finder::parse_lookup(const sync_generic_result &ret)
 			std::string route_addr = "failed to get route table";
 
 			try {
-				route_addr = lookup_address(cmd->id, cmd->id.group_id);
-			} catch (const std::exception &e) {
+				int tmp_backend_id = 0;
+				dnet_net_state *st = dnet_state_get_first_with_backend(get_native_node(), &cmd->id, &tmp_backend_id);
+
+				if (st) {
+					dnet_addr addr = *dnet_state_addr(st);
+					dnet_state_put(st);
+
+					std::string tmp = dnet_server_convert_dnet_addr(&addr);
+					tmp += ", backend: ";
+					tmp += std::to_string(static_cast<long long int>(tmp_backend_id));
+					std::swap(route_addr, tmp);
+				}
+			} catch (const std::exception &) {
 			}
 
 			if (!info) {
-				dnet_log_raw(get_node().get_native(), DNET_LOG_DATA, "%s: FIND object: %s: should live at: %s\n",
-					dnet_dump_id(&cmd->id), addr_str, route_addr.c_str());
+				printf("%s: FIND object: %s, backend: %d: should live at: %s\n",
+					dnet_dump_id(&cmd->id), addr_str, backend_id, route_addr.c_str());
 			} else {
 				char tstr[64];
 				struct tm tm;
@@ -107,17 +102,18 @@ void finder::parse_lookup(const sync_generic_result &ret)
 				localtime_r((time_t *)&info->mtime.tsec, &tm);
 				strftime(tstr, sizeof(tstr), "%F %R:%S %Z", &tm);
 
-				dnet_log_raw(get_node().get_native(), DNET_LOG_DATA, "%s: FIND-OK object: %s: should live at: %s, "
+				printf("%s: FIND-OK object: %s, backend: %d, should live at: %s, "
 						"offset: %llu, size: %llu, mtime: %s, path: %s\n",
-					dnet_dump_id(&cmd->id), addr_str, route_addr.c_str(),
+					dnet_dump_id(&cmd->id), addr_str, backend_id, route_addr.c_str(),
 					(unsigned long long)info->offset, (unsigned long long)info->size,
 					tstr, (char *)(info + 1));
 			}
 		} else {
 			if (cmd->status != 0)
-				dnet_log_raw(get_node().get_native(), DNET_LOG_DATA, "%s: FIND object: status: %d\n",
+				printf("%s: FIND object: status: %d\n",
 						dnet_dump_id(&cmd->id), cmd->status);
 		}
+		fflush(stdout);
 	}
 }
 
@@ -137,45 +133,45 @@ int main(int argc, char *argv[])
 {
 	int ch, err;
 	const char *logfile = "/dev/stderr";
-	int log_level = DNET_LOG_ERROR;
+	dnet_log_level log_level = DNET_LOG_ERROR;
 	char *remote = NULL;
 	struct dnet_id raw;
 	memset(&raw, 0, sizeof(struct dnet_id));
 
-	while ((ch = getopt(argc, argv, "r:l:m:I:h")) != -1) {
-		switch (ch) {
-			case 'r':
-				remote = optarg;
-				break;
-			case 'l':
-				logfile = optarg;
-				break;
-			case 'm':
-				log_level = strtoul(optarg, NULL, 0);
-				break;
-			case 'I':
-				err = dnet_parse_numeric_id(optarg, raw.id);
-				if (err < 0)
-					return err;
-				break;
-			case 'h':
-			default:
-				efinder_usage(argv[0]);
-
-		}
-	}
-
-	if (!remote) {
-		fprintf(stderr, "You must specify remote addr and object ID\n");
-		efinder_usage(argv[0]);
-	}
-
 	try {
+		while ((ch = getopt(argc, argv, "r:l:m:I:h")) != -1) {
+			switch (ch) {
+				case 'r':
+					remote = optarg;
+					break;
+				case 'l':
+					logfile = optarg;
+					break;
+				case 'm':
+					log_level = file_logger::parse_level(optarg);
+					break;
+				case 'I':
+					err = dnet_parse_numeric_id(optarg, raw.id);
+					if (err < 0)
+						return err;
+					break;
+				case 'h':
+				default:
+					efinder_usage(argv[0]);
+
+			}
+		}
+
+		if (!remote) {
+			fprintf(stderr, "You must specify remote addr and object ID\n");
+			efinder_usage(argv[0]);
+		}
+
 		file_logger log(logfile, log_level);
-		node n(log);
+		node n(logger(log, blackhole::log::attributes_t()));
 		finder find(n);
 
-		find.add_remote(remote);
+		n.add_remote(remote);
 
 		{
 			transport_control ctl(raw, DNET_CMD_LOOKUP,

@@ -30,7 +30,7 @@ try:
 
 	n = elliptics.Node(log, cfg)
 
-	n.add_remote("localhost", 1025)
+	n.add_remotes("localhost:1025:2")
 
 	s = elliptics.Session(n)
 
@@ -99,13 +99,8 @@ try:
 	except Exception as e:
 		print "Failed to read bulk:", e
 
-	routes = s.get_routes()
-	for route in routes:
+	for route in s.routes:
 		print route[0].group_id, route[0], route[1]
-
-	print "Requesting stat_log"
-	for stat in s.stat_log():
-		pprint(stat.statistics)
 
 except:
 	print "Unexpected error:", sys.exc_info()

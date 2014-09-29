@@ -13,7 +13,7 @@
 # GNU General Public License for more details.
 # =============================================================================
 
-from elliptics.core import Session
+from elliptics.core import Session, monitor_stat_categories
 from elliptics.route import RouteList, Address
 from elliptics.log import logged_class
 
@@ -37,7 +37,8 @@ class Session(Session):
         cloned_session = session.clone()
         '''
         session = super(Session, self).clone()
-        session._node = self._node
+        session.__class__ = self.__class__
+        session.__node = self._node
         return session
 
     @property
@@ -46,14 +47,7 @@ class Session(Session):
         Returns current routes table\n
         routes = session.routes
         """
-        return self.get_routes()
-
-    def get_routes(self):
-        """
-        Returns current routes table\n
-        routes = session.get_routes
-        """
-        return RouteList.from_routes(super(Session, self).get_routes())
+        return RouteList.from_routes(super(Session, self).routes)
 
     def lookup_address(self, key, group_id):
         """
@@ -61,10 +55,13 @@ class Session(Session):
         address = session.lookup_address('looking up key')
         print '\'looking up key\' should lives on node:', address
         """
-        return Address.from_host_port(super(Session, self)
-                                      .lookup_address(key, group_id), group_id)
+        return Address.from_host_port(super(Session, self).lookup_address(key, group_id))
 
     def bulk_write(self, datas):
+        """
+        Writes several objects at once.
+        @datas - can be dict: {key:value} or iterable container of tuples (elliptics.IoAttr, data)
+        """
         if type(datas) is dict:
             return super(Session, self).bulk_write(datas.items())
         else:
@@ -154,3 +151,98 @@ class Session(Session):
             indexes = indexes.keys()
 
         return super(Session, self).update_indexes_internal(id, indexes, datas)
+
+    def set_direct_id(self, address, backend_id=None):
+        """
+        Makes session sends all request directly to @address without forwarding.
+        If @backend_id is not None all requests sent by session will be handled at specified backend
+        """
+        if backend_id is None:
+            super(Session, self).set_direct_id(host=address.host,
+                                               port=address.port,
+                                               family=address.family)
+        else:
+            super(Session, self).set_direct_id(host=address.host,
+                                               port=address.port,
+                                               family=address.family,
+                                               backend_id=backend_id)
+
+    def update_status(self, address, status):
+        """
+        Updates status of @address to @status.
+        If address is elliptics.Address then status of this node will be updated.
+        """
+        super(Session, self).update_status(host=address.host,
+                                           port=address.port,
+                                           family=address.family,
+                                           status=status)
+
+    def enable_backend(self, address, backend_id):
+        """
+        Enables backend @backend_id on @address.
+        Return elliptics.AsyncResult that provides new status of backend
+        """
+        return super(Session, self).enable_backend(host=address.host,
+                                                   port=address.port,
+                                                   family=address.family,
+                                                   backend_id=backend_id)
+
+    def disable_backend(self, address, backend_id):
+        """
+        Disables backend @backend_id on @address.
+        Return elliptics.AsyncResult that provides new status of backend
+        """
+        return super(Session, self).disable_backend(host=address.host,
+                                                    port=address.port,
+                                                    family=address.family,
+                                                    backend_id=backend_id)
+
+    def start_defrag(self, address, backend_id):
+        """
+        Starts defragmentation of backend @backend_id on @address.
+        Return elliptics.AsyncResult that provides new status of backend
+        """
+        return super(Session, self).start_defrag(host=address.host,
+                                                 port=address.port,
+                                                 family=address.family,
+                                                 backend_id=backend_id)
+
+    def request_backends_status(self, address):
+        """
+        Request statuses of all backends from @address.
+        Return elliptics.AsyncResult that provides statuses of all presented backend
+        """
+        return super(Session, self).request_backends_status(host=address.host,
+                                                            port=address.port,
+                                                            family=address.family)
+
+    def make_readonly(self, address, backend_id):
+        '''
+        Makes read-only backend @backend_id on @address
+        '''
+        return super(Session, self).make_readonly(host=address.host,
+                                                  port=address.port,
+                                                  family=address.family,
+                                                  backend_id=backend_id)
+
+    def make_writable(self, address, backend_id):
+        '''
+        Makes read-write-able backend @backend_id on @address
+        '''
+        return super(Session, self).make_writable(host=address.host,
+                                                  port=address.port,
+                                                  family=address.family,
+                                                  backend_id=backend_id)
+
+    def monitor_stat(self, address=None, categories=monitor_stat_categories.all):
+        '''
+        Gather monitor statistics of specified categories from @address.
+        If @address is None monitoring statistics will be gathered from all nodes.\n
+        result = session.monitor_stat(elliptics.Address.from_host_port('host.com:1025'))
+        stats = result.get()
+        '''
+        if not address:
+            address = ()
+        else:
+            address = tuple(address)
+        return super(Session, self).monitor_stat(address, categories);

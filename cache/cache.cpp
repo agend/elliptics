@@ -25,51 +25,48 @@
 #include "monitor/monitor.h"
 #include "monitor/monitor.hpp"
 #include "monitor/statistics.hpp"
-#include "monitor/rapidjson/document.h"
-#include "monitor/rapidjson/writer.h"
-#include "monitor/rapidjson/stringbuffer.h"
+#include "rapidjson/document.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
+
+#include "../example/config.hpp"
 
 namespace ioremap { namespace cache {
 
-class cache_stat_provider : public ioremap::monitor::stat_provider {
-public:
-	cache_stat_provider(const cache_manager &manager)
-	: m_manager(manager)
-	{}
-
-	virtual std::string json() const {
-		return m_manager.stat_json();
+std::unique_ptr<cache_config> cache_config::parse(const elliptics::config::config &cache)
+{
+	auto size = cache.at("size");
+	if (size.as<size_t>() == 0) {
+		throw elliptics::config::config_error(size.path() + " must be non-zero");
 	}
 
-	virtual bool check_category(int category) const {
-		return category == DNET_MONITOR_CACHE || category == DNET_MONITOR_ALL;
-	}
+	cache_config config;
+	config.size = size.as<size_t>();
+	config.count = cache.at<size_t>("shards", DNET_DEFAULT_CACHES_NUMBER);
+	config.sync_timeout = cache.at<unsigned>("sync_timeout", DNET_DEFAULT_CACHE_SYNC_TIMEOUT_SEC);
+	config.pages_proportions = cache.at("pages_proportions", std::vector<size_t>(DNET_DEFAULT_CACHE_PAGES_NUMBER, 1));
+	return blackhole::utils::make_unique<cache_config>(config);
+}
 
-private:
-	const cache_manager	&m_manager;
-};
-
-cache_manager::cache_manager(struct dnet_node *n) {
-	size_t caches_number = n->caches_number;
-	m_cache_pages_number = n->cache_pages_number;
-	m_max_cache_size = n->cache_size;
+cache_manager::cache_manager(dnet_backend_io *backend, dnet_node *n, const cache_config &config) : m_node(n) {
+	size_t caches_number = config.count;
+	m_cache_pages_number = config.pages_proportions.size();
+	m_max_cache_size = config.size;
 	size_t max_size = m_max_cache_size / caches_number;
 
 	size_t proportionsSum = 0;
 	for (size_t i = 0; i < m_cache_pages_number; ++i) {
-		proportionsSum += n->cache_pages_proportions[i];
+		proportionsSum += config.pages_proportions[i];
 	}
 
 	std::vector<size_t> pages_max_sizes(m_cache_pages_number);
 	for (size_t i = 0; i < m_cache_pages_number; ++i) {
-		pages_max_sizes[i] = max_size * (n->cache_pages_proportions[i] * 1.0 / proportionsSum);
+		pages_max_sizes[i] = max_size * (config.pages_proportions[i] * 1.0 / proportionsSum);
 	}
 
 	for (size_t i = 0; i < caches_number; ++i) {
-		m_caches.emplace_back(std::make_shared<slru_cache_t>(n, pages_max_sizes));
+		m_caches.emplace_back(std::make_shared<slru_cache_t>(backend, n, pages_max_sizes, config.sync_timeout));
 	}
-
-	ioremap::monitor::dnet_monitor_add_provider(n, new cache_stat_provider(*this), "cache");
 }
 
 cache_manager::~cache_manager() {
@@ -155,16 +152,10 @@ rapidjson::Value &cache_manager::get_total_caches_size_stats_json(rapidjson::Val
 	return stats.to_json(stat_value, allocator);
 }
 
-std::string get_cache_name(int id, size_t number_length) {
-	std::string name = boost::lexical_cast<std::string> (id);
-	std::string prefix(number_length - name.length(), '0');
-	return "Cache_" + prefix + name;
-}
-
 rapidjson::Value &cache_manager::get_caches_size_stats_json(rapidjson::Value &stat_value, rapidjson::Document::AllocatorType &allocator) const {
 	for (size_t i = 0; i < m_caches.size(); ++i) {
 		rapidjson::Value cache_time_stats(rapidjson::kObjectType);
-		stat_value.AddMember(get_cache_name(i, 2).c_str(), allocator, m_caches[i]->get_cache_stats().to_json(cache_time_stats, allocator), allocator);
+		stat_value.AddMember(std::to_string(static_cast<unsigned long long>(i)).c_str(), allocator, m_caches[i]->get_cache_stats().to_json(cache_time_stats, allocator), allocator);
 	}
 	return stat_value;
 }
@@ -202,21 +193,21 @@ size_t cache_manager::idx(const unsigned char *id) {
 
 using namespace ioremap::cache;
 
-int dnet_cmd_cache_io(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dnet_io_attr *io, char *data)
+int dnet_cmd_cache_io(struct dnet_backend_io *backend, struct dnet_net_state *st, struct dnet_cmd *cmd, struct dnet_io_attr *io, char *data)
 {
 	react::action_guard cache_guard(ACTION_CACHE);
 
 	struct dnet_node *n = st->n;
 	int err = -ENOTSUP;
 
-	if (!n->cache) {
+	if (!backend->cache) {
 		if (io->flags & DNET_IO_FLAGS_CACHE) {
-			dnet_log(n, DNET_LOG_NOTICE, "%s: cache is not supported\n", dnet_dump_id(&cmd->id));
+			dnet_log(n, DNET_LOG_NOTICE, "%s: cache is not supported", dnet_dump_id(&cmd->id));
 		}
 		return -ENOTSUP;
 	}
 
-	cache_manager *cache = (cache_manager *)n->cache;
+	cache_manager *cache = (cache_manager *)backend->cache;
 	std::shared_ptr<raw_data_t> d;
 
 	try {
@@ -235,9 +226,12 @@ int dnet_cmd_cache_io(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dn
 					break;
 				}
 
-				if (io->offset + io->size > d->size()) {
-					dnet_log_raw(n, DNET_LOG_ERROR, "%s: %s cache: invalid offset/size: "
-							"offset: %llu, size: %llu, cached-size: %zd\n",
+				/*!
+				 * When offset is larger then size of the file, operation is definitely incorrect
+				 */
+				if (io->offset >= d->size()) {
+					BH_LOG(*n->log, DNET_LOG_ERROR, "%s: %s cache: invalid offset: "
+							"offset: %llu, size: %llu, cached-size: %zd",
 							dnet_dump_id(&cmd->id), dnet_cmd_string(cmd->cmd),
 							(unsigned long long)io->offset, (unsigned long long)io->size,
 							d->size());
@@ -245,6 +239,17 @@ int dnet_cmd_cache_io(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dn
 					break;
 				}
 
+				/*!
+				 * If offset is correct, but offset + read_size is bigger then file_size
+				 * then we should return data from offset position till the end of the file
+				 * This situation happens when for example we want to read first 100 bytes of
+				 * the file and it's size appears to be less then 100 bytes.
+				 */
+				io->size = std::min(io->size, d->size() - io->offset);
+
+				/*!
+				 * 0 is special value for io operation size and in this case we should read all file
+				 */
 				if (io->size == 0)
 					io->size = d->size() - io->offset;
 
@@ -258,7 +263,7 @@ int dnet_cmd_cache_io(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dn
 				break;
 		}
 	} catch (const std::exception &e) {
-		dnet_log_raw(n, DNET_LOG_ERROR, "%s: %s cache operation failed: %s\n",
+		BH_LOG(*n->log, DNET_LOG_ERROR, "%s: %s cache operation failed: %s",
 				dnet_dump_id(&cmd->id), dnet_cmd_string(cmd->cmd), e.what());
 		err = -ENOENT;
 	}
@@ -266,58 +271,23 @@ int dnet_cmd_cache_io(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dn
 	return err;
 }
 
-int dnet_cmd_cache_indexes(struct dnet_net_state *st, struct dnet_cmd *cmd, struct dnet_indexes_request *request)
+int dnet_cmd_cache_lookup(struct dnet_backend_io *backend, struct dnet_net_state *st, struct dnet_cmd *cmd)
 {
 	react::action_guard cache_guard(ACTION_CACHE);
 
 	struct dnet_node *n = st->n;
 	int err = -ENOTSUP;
 
-	if (!n->cache) {
-		dnet_log(n, DNET_LOG_ERROR, "%s: cache is not supported\n", dnet_dump_id(&cmd->id));
+	if (!backend->cache) {
 		return -ENOTSUP;
 	}
 
-	cache_manager *cache = (cache_manager *)n->cache;
-
-	try {
-		switch (cmd->cmd) {
-			case DNET_CMD_INDEXES_FIND:
-				err = cache->indexes_find(cmd, request);
-				break;
-			case DNET_CMD_INDEXES_UPDATE:
-				err = cache->indexes_update(cmd, request);
-				break;
-			case DNET_CMD_INDEXES_INTERNAL:
-				err = cache->indexes_internal(cmd, request);
-				break;
-		}
-	} catch (const std::exception &e) {
-		dnet_log_raw(n, DNET_LOG_ERROR, "%s: %s cache operation failed: %s\n",
-				dnet_dump_id(&cmd->id), dnet_cmd_string(cmd->cmd), e.what());
-		err = -ENOENT;
-	}
-
-	return err;
-}
-
-int dnet_cmd_cache_lookup(struct dnet_net_state *st, struct dnet_cmd *cmd)
-{
-	react::action_guard cache_guard(ACTION_CACHE);
-
-	struct dnet_node *n = st->n;
-	int err = -ENOTSUP;
-
-	if (!n->cache) {
-		return -ENOTSUP;
-	}
-
-	cache_manager *cache = (cache_manager *)n->cache;
+	cache_manager *cache = (cache_manager *)backend->cache;
 
 	try {
 		err = cache->lookup(cmd->id.id, st, cmd);
 	} catch (const std::exception &e) {
-		dnet_log_raw(n, DNET_LOG_ERROR, "%s: %s cache operation failed: %s\n",
+		BH_LOG(*n->log, DNET_LOG_ERROR, "%s: %s cache operation failed: %s",
 				dnet_dump_id(&cmd->id), dnet_cmd_string(cmd->cmd), e.what());
 		err = -ENOENT;
 	}
@@ -325,24 +295,17 @@ int dnet_cmd_cache_lookup(struct dnet_net_state *st, struct dnet_cmd *cmd)
 	return err;
 }
 
-int dnet_cache_init(struct dnet_node *n)
+void *dnet_cache_init(struct dnet_node *n, struct dnet_backend_io *backend, const void *config)
 {
-	if (!n->cache_size)
-		return 0;
-
 	try {
-		n->cache = (void *)(new cache_manager(n));
+		return (void *)(new cache_manager(backend, n, *reinterpret_cast<const cache_config *>(config)));
 	} catch (const std::exception &e) {
-		dnet_log_raw(n, DNET_LOG_ERROR, "Could not create cache: %s\n", e.what());
-		return -ENOMEM;
+		BH_LOG(*n->log, DNET_LOG_ERROR, "Could not create cache: %s", e.what());
+		return NULL;
 	}
-
-	return 0;
 }
 
-void dnet_cache_cleanup(struct dnet_node *n)
+void dnet_cache_cleanup(void *cache)
 {
-	if (n->cache) {
-		delete (cache_manager *)n->cache;
-	}
+	delete (cache_manager *)cache;
 }

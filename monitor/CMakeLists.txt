@@ -9,7 +9,7 @@ set(REACT_SOURCES
     react/elliptics_react_actions.cpp
     )
 
-ADD_LIBRARY(elliptics_monitor SHARED
+ADD_LIBRARY(elliptics_monitor STATIC
             monitor.cpp
             server.cpp
             statistics.cpp
@@ -18,19 +18,12 @@ ADD_LIBRARY(elliptics_monitor SHARED
             react_stat_provider.cpp
             ${REACT_HEADERS}
             ${REACT_SOURCES}
+            backends_stat_provider.cpp
+            procfs_provider.cpp
     )
 
-set_target_properties(elliptics_monitor PROPERTIES
-    VERSION ${ELLIPTICS_VERSION}
-    SOVERSION ${ELLIPTICS_VERSION_ABI}
-    LINKER_LANGUAGE CXX
-    )
+if(UNIX OR MINGW)
+	set_target_properties(elliptics_monitor PROPERTIES COMPILE_FLAGS "-fPIC")
+endif()
 
-target_link_libraries(elliptics_monitor ${CMAKE_THREAD_LIBS_INIT} ${Boost_LIBRARIES} react)
-
-install(TARGETS elliptics_monitor
-    EXPORT EllipticsTargets
-    LIBRARY DESTINATION lib${LIB_SUFFIX}
-    ARCHIVE DESTINATION lib${LIB_SUFFIX}
-    BUNDLE DESTINATION library
-    )
+target_link_libraries(elliptics_monitor ${CMAKE_THREAD_LIBS_INIT} ${Boost_LIBRARIES} react elliptics_client elliptics_cache)

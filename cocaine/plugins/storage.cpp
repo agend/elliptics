@@ -28,37 +28,52 @@ using namespace cocaine::logging;
 using namespace cocaine::storage;
 namespace ell = ioremap::elliptics;
 
-log_adapter_impl_t::log_adapter_impl_t(const std::shared_ptr<logging::log_t> &log ): m_log(log)
+static cocaine::logging::priorities convert_verbosity(ioremap::elliptics::log_level level)
 {
-}
-
-void log_adapter_impl_t::log(const int level, const char *message)
-{
-	switch(level) {
+	switch (level) {
 		case DNET_LOG_DEBUG:
-			COCAINE_LOG_DEBUG(m_log, "%s", message);
-			break;
-
+			return cocaine::logging::debug;
 		case DNET_LOG_NOTICE:
-			COCAINE_LOG_INFO(m_log, "%s", message);
-			break;
-
 		case DNET_LOG_INFO:
-			COCAINE_LOG_INFO(m_log, "%s", message);
-			break;
-
+			return cocaine::logging::info;
+		case DNET_LOG_WARNING:
+			return cocaine::logging::warning;
 		case DNET_LOG_ERROR:
-			COCAINE_LOG_ERROR(m_log, "%s", message);
-			break;
-
+			return cocaine::logging::error;
 		default:
-			break;
+			return cocaine::logging::ignore;
 	};
 }
 
-log_adapter_t::log_adapter_t(const std::shared_ptr<logging::log_t> &log, const int level)
-	: ell::logger(new log_adapter_impl_t(log), level)
+static dnet_log_level convert_verbosity(cocaine::logging::priorities prio) {
+	switch (prio) {
+		case cocaine::logging::debug:
+			return DNET_LOG_DEBUG;
+		case cocaine::logging::info:
+			return DNET_LOG_INFO;
+		case cocaine::logging::warning:
+			return DNET_LOG_WARNING;
+		case cocaine::logging::error:
+		default:
+			return DNET_LOG_ERROR;
+	}
+}
+
+log_adapter_impl_t::log_adapter_impl_t(const std::shared_ptr<logging::log_t> &log): m_log(log), m_formatter("%(message)s %(...L)s")
 {
+}
+
+void log_adapter_impl_t::handle(const blackhole::log::record_t &record)
+{
+	dnet_log_level level = record.extract<dnet_log_level>(blackhole::keyword::severity<dnet_log_level>().name());
+	auto cocaine_level = convert_verbosity(level);
+	COCAINE_LOG(m_log, cocaine_level, "elliptics: %s", m_formatter.format(record));
+}
+
+log_adapter_t::log_adapter_t(const std::shared_ptr<logging::log_t> &log)
+{
+	add_frontend(blackhole::utils::make_unique<log_adapter_impl_t>(log));
+	verbosity(convert_verbosity(log->verbosity()));
 }
 
 namespace {
@@ -83,9 +98,9 @@ elliptics_storage_t::elliptics_storage_t(context_t &context, const std::string &
 	category_type(context, name, args),
 	m_context(context),
 	m_log(new log_t(context, name)),
-	m_log_adapter(m_log, args.get("verbosity", DNET_LOG_ERROR).asUInt()),
+	m_log_adapter(m_log),
 	m_config(parse_json_config(args)),
-	m_node(m_log_adapter, m_config),
+	m_node(ioremap::elliptics::logger(m_log_adapter, blackhole::log::attributes_t()), m_config),
 	m_session(m_node)
 {
 	Json::Value nodes(args["nodes"]);
@@ -94,19 +109,19 @@ elliptics_storage_t::elliptics_storage_t(context_t &context, const std::string &
 		throw storage_error_t("no nodes has been specified");
 	}
 
-	bool have_remotes = false;
-
+	std::vector<ioremap::elliptics::address> remotes;
 	for (auto it = nodes.begin(); it != nodes.end(); ++it) {
 		try {
-			m_node.add_remote((*it).asCString());
-			have_remotes = true;
-		} catch (...) {
-			// Do nothing. Yes. Really. We only care if no remote nodes were added at all.
+			remotes.emplace_back((*it).asString());
+		} catch (ioremap::elliptics::error &exc) {
+			throw storage_error_t("failed to parse remote: %s", exc.what());
 		}
 	}
 
-	if (!have_remotes) {
-		throw storage_error_t("can not connect to any remote node");
+	try {
+		m_node.add_remote(remotes);
+	} catch (ioremap::elliptics::error &exc) {
+		throw storage_error_t("failed to add remotes: %s", exc.what());
 	}
 
 	{
@@ -219,6 +234,24 @@ ell::async_read_result elliptics_storage_t::async_read(const std::string &collec
 	session.set_timeout(m_timeouts.read);
 
 	return session.read_data(key, 0, 0);
+}
+
+ell::async_read_result elliptics_storage_t::async_read_latest(const std::string &collection, const std::string &key)
+{
+	using namespace std::placeholders;
+
+	COCAINE_LOG_DEBUG(
+		m_log,
+		"reading the '%s' object, collection: '%s'",
+		key,
+		collection
+	);
+
+	ell::session session = m_session.clone();
+	session.set_namespace(collection.data(), collection.size());
+	session.set_timeout(m_timeouts.read);
+
+	return session.read_latest(key, 0, 0);
 }
 
 static void on_adding_index_finished(const elliptics_storage_t::log_ptr &log,

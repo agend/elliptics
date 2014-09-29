@@ -28,12 +28,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include <ctime>
 #include <iostream>
 
 #include <netinet/in.h>
 
 #include <elliptics/cppdef.h>
+#include <elliptics/timer.hpp>
 
 using namespace ioremap::elliptics;
 
@@ -43,17 +45,15 @@ using namespace ioremap::elliptics;
 
 static void dnet_usage(char *p)
 {
-	fprintf(stderr, "Usage: %s\n"
+	fprintf(stderr, "Usage: %s <options> [indexes ...]\n"
 			" -r addr:port:family  - adds a route to the given node\n"
-			" -W file              - write given file to the network storage\n"
-			" -I id                - transaction id\n"
-			" -g groups            - group IDs to connect\n"
-			" -l log               - log file. Default: disabled\n"
-			" -w timeout           - wait timeout in seconds used to wait for content sync.\n"
-			" ...                  - parameters can be repeated multiple times\n"
-			"                        each time they correspond to the last added node\n"
+			" -U key               - put given key into indexes\n"
+			" -I id                - put given numeric ID key into indexes\n"
+			" -g groups            - group IDs to connect(format: 1:2:3)\n"
+			" -w timeout           - wait timeout in seconds used to wait for content sync\n"
+			" -l log               - log file. Default: /dev/stderr\n"
 			" -m level             - log level\n"
-			" -F flags             - change node flags (see @cfg->flags comments in include/elliptics/interface.h)\n"
+			" -F                   - find given indexes\n"
 			" -N namespace         - use this namespace for operations\n"
 			" -C flags             - command flags\n"
 			" -i flags             - IO flags (see DNET_IO_FLAGS_* in include/elliptics/packet.h\n"
@@ -73,41 +73,6 @@ static key create_id(unsigned char *id, const char *file_name)
 		return key(file_name);
 	}
 }
-
-std::vector<int> parse_groups(char *value)
-{
-	std::vector<int> result;
-	bool finished = false;
-	while (!finished && value && *value) {
-		char *delimiter = const_cast<char *>(strchrnul(value, DNET_CONF_ADDR_DELIM));
-		finished = !*delimiter;
-		*delimiter = '\0';
-		if (delimiter - value > 0)
-			result.push_back(atoi(value));
-		value = delimiter + 1;
-	}
-	return result;
-}
-
-class timer
-{
-	public:
-		timer(const char *name) : m_name(name), m_clock(clock())
-		{
-		}
-
-		~timer()
-		{
-			std::cerr << m_name << ": "
-				<< double(clock() - m_clock)
-				<< " ticks"
-				<< std::endl;
-		}
-
-	private:
-		const char *m_name;
-		clock_t m_clock;
-};
 
 int main(int argc, char *argv[])
 {
@@ -130,68 +95,68 @@ int main(int argc, char *argv[])
 	memset(&cfg, 0, sizeof(struct dnet_config));
 
 	cfg.wait_timeout = 60;
-	int log_level = DNET_LOG_ERROR;
-
-	while ((ch = getopt(argc, argv, "-i:C:N:g:m:w:l:I:r:U:Fh")) != -1) {
-		switch (ch) {
-			case 1:
-				indexes.push_back(optarg);
-				break;
-			case 'i':
-				ioflags = strtoull(optarg, NULL, 0);
-				break;
-			case 'C':
-				cflags = strtoull(optarg, NULL, 0);
-				break;
-			case 'N':
-				ns = optarg;
-				nsize = strlen(optarg);
-				break;
-			case 'm':
-				log_level = atoi(optarg);
-				break;
-			case 'w':
-				cfg.check_timeout = cfg.wait_timeout = atoi(optarg);
-				break;
-			case 'l':
-				logfile = optarg;
-				break;
-			case 'I':
-				err = dnet_parse_numeric_id(optarg, trans_id);
-				if (err)
-					return err;
-				id = trans_id;
-				break;
-			case 'g': {
-				groups = parse_groups(optarg);
-				std::cerr << optarg << " -> {";
-				for (auto it = groups.begin(); it != groups.end(); ++it) {
-					std::cerr << *it << ", ";
-				}
-				std::cerr << "}" << std::endl;
-				break;
-			}
-			case 'r':
-				remotes.push_back(optarg);
-				break;
-			case 'U':
-				update = optarg;
-				break;
-			case 'F':
-				find = true;
-				break;
-			case 'h':
-				dnet_usage(argv[0]);
-			default:
-				dnet_usage(argv[0]);
-				return -1;
-		}
-	}
+	dnet_log_level log_level = DNET_LOG_ERROR;
 
 	try {
+		while ((ch = getopt(argc, argv, "-i:C:N:g:m:w:l:I:r:U:Fh")) != -1) {
+			switch (ch) {
+				case 1:
+					indexes.push_back(optarg);
+					break;
+				case 'i':
+					ioflags = strtoull(optarg, NULL, 0);
+					break;
+				case 'C':
+					cflags = strtoull(optarg, NULL, 0);
+					break;
+				case 'N':
+					ns = optarg;
+					nsize = strlen(optarg);
+					break;
+				case 'm':
+					log_level = file_logger::parse_level(optarg);
+					break;
+				case 'w':
+					cfg.check_timeout = cfg.wait_timeout = atoi(optarg);
+					break;
+				case 'l':
+					logfile = optarg;
+					break;
+				case 'I':
+					err = dnet_parse_numeric_id(optarg, trans_id);
+					if (err)
+						return err;
+					id = trans_id;
+					break;
+				case 'g': {
+					groups = parse_groups(optarg);
+					std::cerr << optarg << " -> {";
+					for (auto it = groups.begin(); it != groups.end(); ++it) {
+						std::cerr << *it << ", ";
+					}
+					std::cerr << "}" << std::endl;
+					break;
+				}
+				case 'r':
+					remotes.push_back(optarg);
+					break;
+				case 'U':
+					update = optarg;
+					break;
+				case 'F':
+					find = true;
+					break;
+				case 'h':
+					dnet_usage(argv[0]);
+				default:
+					dnet_usage(argv[0]);
+					return -1;
+			}
+		}
+
 		file_logger log(logfile, log_level);
 
-		node n(log, cfg);
+		node n(logger(log, blackhole::log::attributes_t()), cfg);
 		session s(n);
 
 		s.set_cflags(cflags);
@@ -212,7 +177,7 @@ int main(int argc, char *argv[])
 		s.set_namespace(ns, nsize);
 
 		if (update) {
-			timer t("update");
+			timer t;
 			int result = 0;
 			try {
 				datas.resize(indexes.size());
@@ -223,11 +188,11 @@ int main(int argc, char *argv[])
 				result = -ENOMEM;
 			}
 
-			std::cerr << "update: " << result << std::endl;
+			std::cerr << "update: " << result << ", took: " << t.elapsed() << " msecs" << std::endl;
 		}
 
 		if (find) {
-			timer t("find");
+			timer t;
 			std::vector<find_indexes_result_entry> results;
 			int result = 0;
 			try {
@@ -246,6 +211,7 @@ int main(int argc, char *argv[])
 //					<< " \"" << results[i].data.to_string() << "\""
 					<< std::endl;
 			}
+			std::cerr << "took: " << t.elapsed() << " msecs" << std::endl;
 		}
 	} catch (const std::exception &e) {
 		std::cerr << e.what() << std::endl;

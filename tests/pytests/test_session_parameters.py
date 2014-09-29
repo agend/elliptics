@@ -18,7 +18,7 @@
 import sys
 sys.path.insert(0, "")  # for running from cmake
 import pytest
-from conftest import set_property, simple_node, raises
+from conftest import set_property, simple_node, raises, make_session
 from server import server
 import elliptics
 
@@ -46,9 +46,15 @@ exceptions_policy = set((elliptics.exceptions_policy.no_exceptions,
                          elliptics.exceptions_policy.default_exceptions))
 
 filters = set((elliptics.filters.positive,
+               elliptics.filters.positive,
+               elliptics.filters.positive_with_ack,
+               elliptics.filters.positive_final,
                elliptics.filters.negative,
+               elliptics.filters.negative_with_ack,
+               elliptics.filters.negative_final,
                elliptics.filters.all,
-               elliptics.filters.all_with_ack))
+               elliptics.filters.all_with_ack,
+               elliptics.filters.all_final))
 
 checkers = set((elliptics.checkers.no_check,
                 elliptics.checkers.at_least_one,
@@ -74,7 +80,7 @@ class TestSession:
         ('trace_id', 0),
         ('user_flags', 0)])
     def test_properties_default(self, server, simple_node, prop, value):
-        session = elliptics.Session(simple_node)
+        session = elliptics.Session(node=simple_node)
         assert getattr(session, prop) == value
 
     @pytest.mark.parametrize('prop, setter, getter, values', [
@@ -96,7 +102,7 @@ class TestSession:
              elliptics.exceptions_policy.throw_at_iterator_end)),
         ('timeout', 'set_timeout', 'get_timeout', (
          28376487,
-         2 ** 32 - 1)),
+         2 ** 63 - 1)),
         ('timestamp', 'set_timestamp', 'get_timestamp', (
          elliptics.Time(0, 0),
          elliptics.Time(2 ** 64 - 1, 2 ** 64 - 1),
@@ -104,8 +110,6 @@ class TestSession:
         ('trace_id', None, None, (
          0,
          32423946,
-         0 | elliptics.trace_bit,
-         123121435 | elliptics.trace_bit,
          2 ** 32 - 1)),
         ('user_flags', 'set_user_flags', 'get_user_flags', (
          0,
@@ -113,18 +117,16 @@ class TestSession:
          2 ** 64 - 1))])
     def test_properties(self, server, simple_node,
                         prop, setter, getter, values):
-        session = elliptics.Session(simple_node)
+        session = elliptics.Session(node=simple_node)
         assert type(session) == elliptics.Session
         for value in values:
             set_property(session, prop, value,
                          setter=setter,
                          getter=getter)
 
-    def test_trace_bit(self, server, simple_node):
-        assert elliptics.trace_bit == 2 ** 63
-
     def test_resetting_timeout(self, server, simple_node):
-        session = elliptics.Session(simple_node)
+        session = make_session(node=simple_node,
+                               test_name='TestSession.test_resetting_timeout')
         assert session.timeout == 5  # check default timeout value
         session.timeout = 1  # set different value
         assert session.timeout == 1  # check that the value has been set
@@ -135,7 +137,7 @@ class TestSession:
                              ('cflags', 2 ** 64),
                              ('ioflags', 2 ** 32),
                              ('exceptions_policy', 2 ** 32),
-                             ('timeout', 2 ** 32),
+                             ('timeout', 2 ** 63),
                              ('trace_id', 2 ** 64),
                              ('user_flags', 2 ** 64)])
     def test_properties_out_of_limits(self, server, simple_node, prop, value):
@@ -145,7 +147,8 @@ class TestSession:
                       .format(prop, value))
 
     def test_clone(self, server, simple_node):
-        orig_s = elliptics.Session(simple_node)
+        orig_s = make_session(node=simple_node,
+                              test_name='TestSession.test_clone')
 
         orig_s.groups = [1, 2, 3]
         orig_s.timeout = 13

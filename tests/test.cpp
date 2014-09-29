@@ -40,6 +40,10 @@ static void configure_nodes(const std::vector<std::string> &remotes, const std::
 
 			server_config::default_value().apply_options(config_data()
 				("group", 2)
+			),
+
+			server_config::default_value().apply_options(config_data()
+				("group", 3)
 			)
 		}), path);
 	} else
@@ -177,6 +181,10 @@ static void test_recovery(session &sess, const std::string &id, const std::strin
 	ELLIPTICS_REQUIRE(write_result, sess.write_data(id, data, 0));
 	ELLIPTICS_REQUIRE(recovery_read_result, sess.read_data(id, groups, 0, 0));
 
+	// We need to sleep 100 ms as recovery process is run asynchronously in background
+	// so we need to give the server a bit more time to process this write command
+	usleep(100 * 1000);
+
 	for (size_t i = 0; i < groups.size(); ++i) {
 		std::vector<int> current_groups(1, groups[i]);
 		ELLIPTICS_CHECK(read_result, sess.read_data(id, current_groups, 0, 0));
@@ -187,6 +195,12 @@ static void test_recovery(session &sess, const std::string &id, const std::strin
 		}
 	}
 }
+
+/*!
+ * \defgroup test_indexes Test indexes
+ * This tests check operations with indexes
+ * \{
+ */
 
 static void test_indexes(session &sess)
 {
@@ -253,6 +267,60 @@ static void test_more_indexes(session &sess)
 	BOOST_CHECK_EQUAL(all_result[0].indexes.size(), any_result[0].indexes.size());
 	BOOST_CHECK_EQUAL(all_result[0].indexes.size(), indexes.size());
 }
+
+/*!
+ * \brief Tests correctness of get_index_metadata function
+ * Test workflow:
+ * - Write 256 keys to index "index"
+ * - Request "index" metadata, which will consist of metadatas for each shard
+ * - Sum up sizes of shards indexes and check if it equals to 256
+ * - Check if all metainformations from shards were valid
+ */
+static void test_indexes_metadata(session &sess)
+{
+	std::string index = "index";
+	std::vector<std::string> indexes;
+	indexes.push_back(index);
+
+	std::vector<data_pointer> data(indexes.size());
+
+	std::vector<std::string> keys;
+	for (size_t i = 0; i < 256; ++i) {
+		keys.push_back("key-" + boost::lexical_cast<std::string>(i));
+	}
+
+	for (auto it = keys.begin(); it != keys.end(); ++it) {
+		std::string key = *it;
+		ELLIPTICS_REQUIRE(clear_indexes_result, sess.set_indexes(key, std::vector<std::string>(), std::vector<data_pointer>()));
+		ELLIPTICS_REQUIRE(set_indexes_result, sess.set_indexes(key, indexes, data));
+	}
+
+	ELLIPTICS_REQUIRE(get_index_metadata_result, sess.get_index_metadata(index));
+	sync_get_index_metadata_result metadata = get_index_metadata_result.get();
+
+	get_index_metadata_result_entry aggregated_metadata;
+	get_index_metadata_result.get(aggregated_metadata);
+
+	size_t total_index_size = 0;
+	int invalid_results_number = 0;
+	for (size_t i = 0; i < metadata.size(); ++i) {
+		if (metadata[i].is_valid) {
+			total_index_size += metadata[i].index_size;
+			BOOST_REQUIRE_GE(metadata[i].index_size, 0);
+		} else {
+			++invalid_results_number;
+		}
+	}
+	if (invalid_results_number == 0) {
+		BOOST_REQUIRE_EQUAL(total_index_size, keys.size());
+		BOOST_REQUIRE_EQUAL(total_index_size, aggregated_metadata.index_size);
+	} else {
+		BOOST_REQUIRE_LE(total_index_size, keys.size());
+	}
+	BOOST_REQUIRE_EQUAL(invalid_results_number, 0);
+}
+
+/*! \} */ //test_indexes group
 
 static void test_error(session &s, const std::string &id, int err)
 {
@@ -527,6 +595,45 @@ static void test_bulk_read(session &sess, size_t test_count)
 		BOOST_REQUIRE_EQUAL(it->file().to_string(), data);
 	}
 }
+
+static void test_bulk_remove(session &sess, size_t test_count)
+{
+	std::vector<key> keys;
+
+	for (size_t i = 0; i < test_count; ++i) {
+		std::ostringstream os;
+		os << "bulk_write" << i;
+
+		key id(os.str());
+
+		keys.push_back(id);
+	}
+
+	sess.set_checker(checkers::no_check);
+	sess.set_filter(filters::all_with_ack);
+
+	ELLIPTICS_REQUIRE(remove_result, sess.bulk_remove(keys));
+
+	sync_remove_result result = remove_result.get();
+
+	size_t count = 0;
+	for (auto it = result.begin(); it != result.end(); ++it) {
+		// count only acks since they are the only packets returned by remove()
+		count += (it->status() == 0) && (it->is_ack());
+		BOOST_WARN_EQUAL(it->status(), 0);
+	}
+	BOOST_REQUIRE_EQUAL(count, test_count * 2);
+
+	sess.set_checker(checkers::at_least_one);
+	sess.set_filter(filters::positive);
+	for (size_t i = 0; i < test_count; ++i) {
+		std::ostringstream os;
+		os << "bulk_write" << i;
+
+		ELLIPTICS_REQUIRE_ERROR(read_result, sess.read_data(os.str(), 0, 0), -ENOENT);
+	}
+}
+
 
 static void test_range_request_prepare(session &sess, size_t item_count)
 {
@@ -875,10 +982,397 @@ static void test_partial_lookup(session &sess, const std::string &id)
 	BOOST_REQUIRE_EQUAL(sync_lookup_result[1].file_info()->size, data.size());
 }
 
+// The test checks basic case of using the perallel_lookup
+// If a key presents in every group, number of result_entries will equal to number of groups
+static void test_parallel_lookup(session &sess, const std::string &id)
+{
+	std::string data = "data";
+
+	dnet_io_attr io;
+	memset(&io, 0, sizeof(io));
+	dnet_current_time(&io.timestamp);
+
+	key kid(id);
+	kid.transform(sess);
+	memcpy(io.id, kid.raw_id().id, DNET_ID_SIZE);
+
+	sess.set_filter(filters::positive);
+
+	ELLIPTICS_REQUIRE(write_result, sess.write_data(io, data));
+	ELLIPTICS_REQUIRE(read_result, sess.read_data(kid, 0, 0));
+	ELLIPTICS_REQUIRE(lookup_result, sess.parallel_lookup(kid));
+
+	auto results = lookup_result.get();
+	BOOST_REQUIRE_EQUAL(sess.get_groups().size(), results.size());
+
+	for (auto it = results.begin(), end = results.end(); it != end; ++it) {
+		dnet_time new_time = it->file_info()->mtime;
+		BOOST_REQUIRE_EQUAL(new_time.tsec, io.timestamp.tsec);
+		BOOST_REQUIRE_EQUAL(new_time.tnsec, io.timestamp.tnsec);
+	}
+}
+
+// The test checks basic case of using the quorum_lookup
+// If a key present as follows:
+//  - two groups have the key with the same timestamp
+//  - one group has the key with some other timestamp
+// then only result_entries for the key with the same timestamp will be received
+static void test_quorum_lookup(session &sess, const std::string &id)
+{
+	const std::string first_data = "first-data";
+	const std::string second_data = "second-data";
+
+	dnet_raw_id raw_id;
+	sess.transform(id, raw_id);
+
+	session first_sess = sess.clone();
+	first_sess.set_groups({1, 2});
+
+	session second_sess = sess.clone();
+	second_sess.set_groups({3});
+
+	dnet_io_attr io;
+	memset(&io, 0, sizeof(io));
+	dnet_current_time(&io.timestamp);
+	memcpy(io.id, raw_id.id, DNET_ID_SIZE);
+
+	ELLIPTICS_REQUIRE(first_write_result, first_sess.write_data(io, first_data));
+
+	io.timestamp.tsec += 5;
+
+	ELLIPTICS_REQUIRE(second_write_result, second_sess.write_data(io, second_data));
+
+	ELLIPTICS_REQUIRE(prepare_result, sess.quorum_lookup(id));
+
+	auto lookup_result = prepare_result.get();
+
+	BOOST_REQUIRE_EQUAL(lookup_result.size(), 2);
+
+	io.timestamp.tsec -= 5;
+
+	for (size_t i = 0; i != 2; ++i) {
+		BOOST_REQUIRE_EQUAL(lookup_result[i].file_info()->mtime.tsec, io.timestamp.tsec);
+		BOOST_REQUIRE_EQUAL(lookup_result[i].file_info()->mtime.tnsec, io.timestamp.tnsec);
+	}
+}
+
+// Test checks the work of quorum_lookup in case of there are two different keys in two groups
+// and no key in third one.
+static void test_partial_quorum_lookup(session &sess, const std::string &id)
+{
+	const std::string first_data = "first-data";
+	const std::string second_data = "second-data";
+
+	dnet_raw_id raw_id;
+	sess.transform(id, raw_id);
+
+	session first_sess = sess.clone();
+	first_sess.set_groups({1});
+
+	session second_sess = sess.clone();
+	second_sess.set_groups({2});
+
+	dnet_io_attr io;
+	memset(&io, 0, sizeof(io));
+	dnet_current_time(&io.timestamp);
+	memcpy(io.id, raw_id.id, DNET_ID_SIZE);
+
+	ELLIPTICS_REQUIRE(first_write_result, first_sess.write_data(io, first_data));
+
+	io.timestamp.tsec += 5;
+
+	ELLIPTICS_REQUIRE(second_write_result, second_sess.write_data(io, second_data));
+
+	ELLIPTICS_REQUIRE(prepare_result, sess.quorum_lookup(id));
+
+	auto lookup_result = prepare_result.get();
+
+	BOOST_REQUIRE_EQUAL(lookup_result.size(), 1);
+
+	BOOST_REQUIRE_EQUAL(lookup_result[0].file_info()->mtime.tsec, io.timestamp.tsec);
+	BOOST_REQUIRE_EQUAL(lookup_result[0].file_info()->mtime.tnsec, io.timestamp.tnsec);
+}
+
+// The test checks quorum_lookup returns an error in case of there are two different keys
+// in two groups and no key in third one and checker::quorum is set
+static void test_fail_partial_quorum_lookup(session &sess, const std::string &id)
+{
+	const std::string first_data = "first-data";
+	const std::string second_data = "second-data";
+
+	dnet_raw_id raw_id;
+	sess.transform(id, raw_id);
+
+	session first_sess = sess.clone();
+	first_sess.set_groups({1});
+
+	session second_sess = sess.clone();
+	second_sess.set_groups({2});
+
+	dnet_io_attr io;
+	memset(&io, 0, sizeof(io));
+	dnet_current_time(&io.timestamp);
+	memcpy(io.id, raw_id.id, DNET_ID_SIZE);
+
+	ELLIPTICS_REQUIRE(first_write_result, first_sess.write_data(io, first_data));
+
+	io.timestamp.tsec += 5;
+
+	ELLIPTICS_REQUIRE(second_write_result, second_sess.write_data(io, second_data));
+
+	sess.set_checker(checkers::quorum);
+	ELLIPTICS_REQUIRE_ERROR(prepare_result, sess.quorum_lookup(id), -ENXIO);
+}
+
+// The test checks parallel_lookup returns an error in case of
+// there were not result_entries without errors
+static void test_fail_parallel_lookup(session &sess, int error)
+{
+	ELLIPTICS_REQUIRE_ERROR(result,
+			sess.parallel_lookup(std::string("test_fail_parallel_lookup_key")), error);
+}
+
+// The test checks quorum_lookup returns an error in case of
+// there were not result_entries without errors
+static void test_fail_quorum_lookup(session &sess, int error)
+{
+	ELLIPTICS_REQUIRE_ERROR(result,
+			sess.quorum_lookup(std::string("test_fail_quorum_lookup_key")), error);
+}
+
 static void test_read_latest_non_existing(session &sess, const std::string &id)
 {
 	ELLIPTICS_REQUIRE_ERROR(read_data, sess.read_latest(id, 0, 0), -ENOENT);
 }
+
+/*!
+ * \brief test_merge_indexes
+ *
+ * Test the correctness of session::merge_indexes method.
+ *
+ * Algorithm is the following:
+ * \li Add 'merge-key' to indexes 'merge-1' and 'merge-2' at group 1 with data 'data-1'
+ * \li Add 'merge-key' to indexes 'merge-2' and 'merge-3' at group 2 with data 'data-22'
+ * \li Merge indexes for 'merge-key' at groups 1, 2
+ * \li Check if indexes were merged successfully
+ */
+static void test_merge_indexes(session &sess, std::string suffix, result_checker checker)
+{
+	sess.set_namespace("merge-indexes-" + suffix);
+	sess.set_checker(checker);
+
+	key object_id = std::string("merge-key");
+	sess.transform(object_id);
+
+	std::vector<std::string> tags_1 = {
+		"merge-1",
+		"merge-2"
+	};
+	std::vector<data_pointer> data_1 = {
+		data_pointer::copy("data-1"),
+		data_pointer::copy("data-1")
+	};
+
+	std::vector<std::string> tags_2 = {
+		"merge-2",
+		"merge-3"
+	};
+	std::vector<data_pointer> data_2 = {
+		data_pointer::copy("data-22"),
+		data_pointer::copy("data-22")
+	};
+
+	std::vector<std::string> result_tags = {
+		"merge-1",
+		"merge-2",
+		"merge-3"
+	};
+	std::vector<data_pointer> result_data = {
+		data_pointer::copy("data-1"),
+		data_pointer::copy("data-22"),
+		data_pointer::copy("data-22")
+	};
+
+	std::map<key, data_pointer> result;
+
+	for (size_t i = 0; i < result_tags.size(); ++i) {
+		key tag = result_tags[i];
+		tag.transform(sess);
+		result[tag.id()] = result_data[i];
+	}
+
+	session sess_1 = sess.clone();
+	sess_1.set_groups(std::vector<int>(1, 1));
+	ELLIPTICS_REQUIRE(set_indexes_1, sess_1.set_indexes(object_id, tags_1, data_1));
+
+	session sess_2 = sess.clone();
+	sess_2.set_groups(std::vector<int>(1, 2));
+	ELLIPTICS_REQUIRE(set_indexes_2, sess_2.set_indexes(object_id, tags_2, data_2));
+
+	dnet_id index_id;
+	memset(&index_id, 0, sizeof(index_id));
+
+	dnet_indexes_transform_object_id(sess.get_native_node(), &object_id.id(), &index_id);
+	ELLIPTICS_REQUIRE(merge_result, sess.merge_indexes(index_id, sess.get_groups(), sess.get_groups()));
+
+	ELLIPTICS_REQUIRE(list_indexes_1, sess_1.list_indexes(object_id));
+	ELLIPTICS_REQUIRE(list_indexes_2, sess_2.list_indexes(object_id));
+
+	{
+		sync_list_indexes_result list_indexes = list_indexes_1;
+
+		BOOST_REQUIRE_EQUAL(list_indexes.size(), result.size());
+
+		for (auto it = list_indexes.begin(); it != list_indexes.end(); ++it) {
+			auto jt = result.find(it->index);
+			BOOST_REQUIRE(jt != result.end());
+			BOOST_REQUIRE_EQUAL(jt->second.to_string(), it->data.to_string());
+		}
+	}
+
+	{
+		sync_list_indexes_result list_indexes = list_indexes_2;
+
+		BOOST_REQUIRE_EQUAL(list_indexes.size(), result.size());
+
+		for (auto it = list_indexes.begin(); it != list_indexes.end(); ++it) {
+			auto jt = result.find(it->index);
+			BOOST_REQUIRE(jt != result.end());
+			BOOST_REQUIRE_EQUAL(jt->second.to_string(), it->data.to_string());
+		}
+	}
+}
+
+/*!
+ * Test index recovery correctnes.
+ *
+ * Add several object to single index differently at different groups.
+ * Then run session::recovery_index and check if every-thing is ok.
+ */
+void test_index_recovery(session &sess)
+{
+	sess.set_namespace("index-recovery");
+
+	key index = std::string("index");
+	sess.transform(index);
+
+	std::vector<std::string> objects_1 = {
+		"doc-1",
+		"doc-2",
+		"doc-3"
+	};
+
+	std::vector<data_pointer> data_1 = {
+		data_pointer::copy("data-1")
+	};
+
+	std::vector<std::string> objects_2 = {
+		"doc-2",
+		"doc-3",
+		"doc-4"
+	};
+
+	std::vector<data_pointer> data_2 = {
+		data_pointer::copy("data-22")
+	};
+
+	std::vector<std::string> result_objects = {
+		"doc-1",
+		"doc-2",
+		"doc-3",
+		"doc-4",
+		"doc-5"
+	};
+
+	std::vector<data_pointer> result_data = {
+		data_pointer::copy("data-1"),
+		data_pointer::copy("data-22"),
+		data_pointer::copy("data-22"),
+		data_pointer::copy("data-22"),
+		data_pointer::copy("data-3")
+	};
+
+	std::map<key, data_pointer> result;
+
+	for (size_t i = 0; i < result_objects.size(); ++i) {
+		key object = result_objects[i];
+		object.transform(sess);
+		result[object.id()] = result_data[i];
+	}
+
+	session sess_1 = sess.clone();
+	sess_1.set_groups(std::vector<int>(1, 1));
+
+	session sess_2 = sess.clone();
+	sess_2.set_groups(std::vector<int>(1, 2));
+
+	for (auto it = objects_1.begin(); it != objects_1.end(); ++it) {
+		ELLIPTICS_REQUIRE(set_indexes_1, sess_1.set_indexes(*it, std::vector<std::string>(1, index.remote()), data_1));
+	}
+
+	for (auto it = objects_2.begin(); it != objects_2.end(); ++it) {
+		ELLIPTICS_REQUIRE(set_indexes_2, sess_2.set_indexes(*it, std::vector<std::string>(1, index.remote()), data_2));
+	}
+
+	ELLIPTICS_REQUIRE(update_index_internal, sess_1.update_indexes_internal(std::string("doc-5"),
+		std::vector<std::string>(1, index.remote()),
+		std::vector<data_pointer>(1, data_pointer::copy("data-3"))));
+
+	ELLIPTICS_REQUIRE(recover_index_result, sess.recover_index(index));
+
+	for (int group = 1; group <= 2; ++group) {
+		session group_sess = sess.clone();
+		group_sess.set_groups(std::vector<int>(1, group));
+
+		for (size_t i = 0; i < result_objects.size(); ++i) {
+			ELLIPTICS_REQUIRE(async_list_indexes, group_sess.list_indexes(result_objects[i]));
+			sync_list_indexes_result list_indexes = async_list_indexes;
+
+			BOOST_REQUIRE_EQUAL(list_indexes.size(), 1);
+			index_entry entry = list_indexes.front();
+
+			BOOST_REQUIRE_EQUAL(memcmp(entry.index.id, index.raw_id().id, DNET_ID_SIZE), 0);
+			BOOST_REQUIRE_EQUAL(entry.data.to_string(), result_data[i].to_string());
+		}
+
+		ELLIPTICS_REQUIRE(async_find_result, group_sess.find_any_indexes(std::vector<dnet_raw_id>(1, index.raw_id())));
+		sync_find_indexes_result find_result = async_find_result;
+
+		BOOST_REQUIRE_EQUAL(find_result.size(), result.size());
+
+		for (size_t i = 0; i < find_result.size(); ++i) {
+			find_indexes_result_entry result_entry = find_result[i];
+			BOOST_REQUIRE_EQUAL(result_entry.indexes.size(), 1);
+
+			index_entry entry = result_entry.indexes.front();
+
+			BOOST_REQUIRE_EQUAL(memcmp(entry.index.id, index.raw_id().id, DNET_ID_SIZE), 0);
+
+			auto it = result.find(result_entry.id);
+			BOOST_REQUIRE(it != result.end());
+			BOOST_REQUIRE_EQUAL(entry.data.to_string(), it->second.to_string());
+		}
+	}
+}
+
+static void test_lookup_non_existing(session &sess, int error)
+{
+	ELLIPTICS_REQUIRE_ERROR(lookup, sess.lookup(std::string("lookup_non_existing")), error);
+}
+
+#ifndef NO_SERVER
+static void test_requests_to_own_server(session &sess)
+{
+	key id = std::string("own-requests-id");
+	sess.set_filter(filters::positive);
+
+	ELLIPTICS_REQUIRE(async_write, sess.write_data(id, "some-file", 0));
+
+	sync_write_result result = async_write;
+
+	BOOST_REQUIRE_EQUAL(result.size(), 3);
+}
+#endif
 
 bool register_tests(test_suite *suite, node n)
 {
@@ -898,6 +1392,7 @@ bool register_tests(test_suite *suite, node n)
 	ELLIPTICS_TEST_CASE(test_recovery, create_session(n, {1, 2}, 0, 0), "recovery-id", "recovered-data");
 	ELLIPTICS_TEST_CASE(test_indexes, create_session(n, {1, 2}, 0, 0));
 	ELLIPTICS_TEST_CASE(test_more_indexes, create_session(n, {1, 2}, 0, 0));
+	ELLIPTICS_TEST_CASE(test_indexes_metadata, create_session(n, {1, 2}, 0, 0));
 	ELLIPTICS_TEST_CASE(test_error, create_session(n, {99}, 0, 0), "non-existen-key", -ENXIO);
 	ELLIPTICS_TEST_CASE(test_error, create_session(n, {1, 2}, 0, 0), "non-existen-key", -ENOENT);
 	ELLIPTICS_TEST_CASE(test_lookup, create_session(n, {1, 2}, 0, 0), "2.xml", "lookup data");
@@ -912,6 +1407,7 @@ bool register_tests(test_suite *suite, node n)
 	ELLIPTICS_TEST_CASE(test_prepare_commit, create_session(n, {1, 2}, 0, 0), "prepare-commit-test-4", 1, 1);
 	ELLIPTICS_TEST_CASE(test_bulk_write, create_session(n, {1, 2}, 0, 0), 1000);
 	ELLIPTICS_TEST_CASE(test_bulk_read, create_session(n, {1, 2}, 0, 0), 1000);
+	ELLIPTICS_TEST_CASE(test_bulk_remove, create_session(n, {1, 2}, 0, 0), 1000);
 	ELLIPTICS_TEST_CASE(test_range_request, create_session(n, {2}, 0, 0), 0, 255, 2);
 	ELLIPTICS_TEST_CASE(test_range_request, create_session(n, {2}, 0, 0), 3, 14, 2);
 	ELLIPTICS_TEST_CASE(test_range_request, create_session(n, {2}, 0, 0), 7, 3, 2);
@@ -920,7 +1416,25 @@ bool register_tests(test_suite *suite, node n)
 	ELLIPTICS_TEST_CASE(test_indexes_update, create_session(n, {2}, 0, 0));
 	ELLIPTICS_TEST_CASE(test_prepare_latest, create_session(n, {1, 2}, 0, 0), "prepare-latest-key");
 	ELLIPTICS_TEST_CASE(test_partial_lookup, create_session(n, {1, 2}, 0, 0), "partial-lookup-key");
+	ELLIPTICS_TEST_CASE(test_parallel_lookup, create_session(n, {1, 2, 3}, 0, 0), "parallel-lookup-key");
+	ELLIPTICS_TEST_CASE(test_quorum_lookup, create_session(n, {1, 2, 3}, 0, 0), "quorum-lookup-key");
+	ELLIPTICS_TEST_CASE(test_partial_quorum_lookup, create_session(n, {1, 2, 3}, 0, 0), "partial-quorum-lookup-key");
+	ELLIPTICS_TEST_CASE(test_fail_partial_quorum_lookup, create_session(n, {1, 2, 3}, 0, 0), "fail-partial-quorum-lookup-key");
+	ELLIPTICS_TEST_CASE(test_fail_parallel_lookup, create_session(n, {1, 2, 3}, 0, 0), -ENOENT);
+	ELLIPTICS_TEST_CASE(test_fail_parallel_lookup, create_session(n, {91, 92, 93}, 0, 0), -ENXIO);
+	ELLIPTICS_TEST_CASE(test_fail_quorum_lookup, create_session(n, {1, 2, 3}, 0, 0), -ENOENT);
+	ELLIPTICS_TEST_CASE(test_fail_quorum_lookup, create_session(n, {91, 92, 93}, 0, 0), -ENXIO);
 	ELLIPTICS_TEST_CASE(test_read_latest_non_existing, create_session(n, {1, 2}, 0, 0), "read-latest-non-existing");
+	ELLIPTICS_TEST_CASE(test_merge_indexes, create_session(n, { 1, 2 }, 0, 0), "one", checkers::at_least_one);
+	ELLIPTICS_TEST_CASE(test_merge_indexes, create_session(n, { 1, 2 }, 0, 0), "quorum", checkers::quorum);
+	ELLIPTICS_TEST_CASE(test_merge_indexes, create_session(n, { 1, 2 }, 0, 0), "all", checkers::all);
+	ELLIPTICS_TEST_CASE(test_index_recovery, create_session(n, { 1, 2 }, 0, 0));
+	ELLIPTICS_TEST_CASE(test_lookup_non_existing, create_session(n, { 1, 2 }, 0, 0), -ENOENT);
+	ELLIPTICS_TEST_CASE(test_lookup_non_existing, create_session(n, { 1 }, 0, 0), -ENOENT);
+	ELLIPTICS_TEST_CASE(test_lookup_non_existing, create_session(n, { 99 }, 0, 0), -ENXIO);
+#ifndef NO_SERVER
+	ELLIPTICS_TEST_CASE(test_requests_to_own_server, create_session(node::from_raw(global_data->nodes.front().get_native()), { 1, 2, 3 }, 0, 0));
+#endif
 
 	return true;
 }

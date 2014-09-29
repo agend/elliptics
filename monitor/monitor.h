@@ -27,26 +27,6 @@
 extern "C" {
 #endif
 
-// Reserved monitor categories for bad and list requests
-/*!
- * \internal
- *
- * Reserved category for bad request (400)
- */
-#define DNET_MONITOR_BAD			-3
-/*!
- * \internal
- *
- * Reserved category for statistics which was not found (404)
- */
-#define DNET_MONITOR_NOT_FOUND		-2
-/*!
- * \internal
- *
- * Reserved category for list of acceptable statistics
- */
-#define DNET_MONITOR_LIST			-1
-
 struct dnet_node;
 struct dnet_config;
 
@@ -70,8 +50,9 @@ struct stat_provider_raw {
 	 * Callback which returns current statistics of provider in json format
 	 * It will be called only when was requested for statistics
 	 * \a priv - user-defined private data for provider
+	 * \a categories - categories which statistics should be included to json
 	 */
-	const char*	(* json) (void *priv);
+	const char*	(* json) (void *priv, uint64_t categories);
 
 	/*!
 	 * \internal
@@ -81,17 +62,6 @@ struct stat_provider_raw {
 	 * \a priv - user-defined private data for provider
 	 */
 	void		(* stop) (void *priv);
-
-	/*!
-	 * \internal
-	 *
-	 * Checks if provider supports passed \a category.
-	 * Returns 1 if it supports category and 0 otherwise
-	 * It will be called befor \a json callback
-	 * and if it returns 0 then \a json wouldn't be called
-	 * \a priv - user-defined private data for provider
-	 */
-	int		(* check_category) (void *priv, int category);
 };
 
 /*!
@@ -102,7 +72,7 @@ struct stat_provider_raw {
  * then n->monitor will contain pointer to it and
  * should be used in c functions
  */
-int dnet_monitor_init(void **monitor, struct dnet_config *cfg);
+int dnet_monitor_init(struct dnet_node *n, struct dnet_config *cfg);
 
 /*!
  * \internal
@@ -121,17 +91,9 @@ void dnet_monitor_add_provider(struct dnet_node *n, struct stat_provider_raw sta
 
 /*!
  * \internal
- *
- * Creates stat provider for io queues and adds it to provider list
+ * Removes statistics provider by \a name from \a monitor.
  */
-void dnet_monitor_init_io_stat_provider(struct dnet_node *n);
-
-/*!
- * \internal
- *
- * Creates stat provider for react call tree stats and adds it to provider list
- */
-void dnet_monitor_init_react_stat_provider(struct dnet_node *n);
+void dnet_monitor_remove_provider(struct dnet_node *n, const char *name);
 
 /*!
  * \internal

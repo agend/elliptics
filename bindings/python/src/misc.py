@@ -15,6 +15,8 @@
 
 from elliptics.core import *
 from elliptics.route import Address
+from elliptics.node import Node
+from elliptics import log_level
 
 
 @property
@@ -37,15 +39,9 @@ def wrap_address(classes):
         """
         Node address as elliptics.Address
         """
-        if hasattr(cls, 'group_id'):
-            return Address.from_host_port(self.__address__, self.__group_id__)
-        else:
-            return Address.from_host_port(self.__address__)
+        return Address.from_host_port(self.__address__)
     for cls in classes:
         cls.__address__ = cls.address
-        if hasattr(cls, 'group_id'):
-            cls.__group_id__ = cls.group_id
-            del cls.group_id
         cls.address = address
 
 LookupResultEntry.__storage_address__ = LookupResultEntry.storage_address
@@ -59,15 +55,13 @@ wrap_address([IteratorResultEntry,
               LookupResultEntry,
               ExecResultEntry,
               CallbackResultEntry,
-              StatResultEntry,
-              AddressStatistics,
-              StatCountResultEntry,
               MonitorStatResultEntry,
-              ExecContext
+              ExecContext,
+              RouteEntry
               ])
 
 
-def create_node(elog=None, log_file='/dev/stderr', log_level=1,
+def create_node(elog=None, log_file='/dev/stderr', log_level=log_level.error,
                 cfg=None, wait_timeout=3600, check_timeout=60,
                 flags=0, io_thread_num=1, net_thread_num=1,
                 nonblocking_io_thread_num=1, remotes=[]):
@@ -82,11 +76,10 @@ def create_node(elog=None, log_file='/dev/stderr', log_level=1,
         cfg.nonblocking_io_thread_num = nonblocking_io_thread_num
         cfg.net_thread_num = net_thread_num
     n = Node(elog, cfg)
-    for r in remotes:
-        try:
-            n.add_remote(r)
-        except:
-            pass
+    try:
+      n.add_remotes(map(Address.from_host_port_family, remotes))
+    except Exception as e:
+        elog.log(log_level.error, "Coudn't connect to: {0}: {1}".format(repr(remotes), repr(e)))
     return n
 
 

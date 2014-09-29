@@ -30,11 +30,13 @@ class local_session
 {
 	ELLIPTICS_DISABLE_COPY(local_session)
 	public:
-		local_session(dnet_node *node);
+		local_session(dnet_backend_io *backend, dnet_node *node);
 		~local_session();
 
 		void set_ioflags(uint32_t flags);
 		void set_cflags(uint64_t flags);
+
+		int backend_id() const;
 
 		ioremap::elliptics::data_pointer read(const dnet_id &id, int *errp);
 		ioremap::elliptics::data_pointer read(const dnet_id &id, uint64_t *user_flags, dnet_time *timestamp, int *errp);
@@ -44,14 +46,16 @@ class local_session
 		ioremap::elliptics::data_pointer lookup(const dnet_cmd &cmd, int *errp);
 		int remove(const dnet_id &id);
 
-		int update_index_internal(const dnet_id &id, const dnet_raw_id &index, const ioremap::elliptics::data_pointer &data, uint32_t action);
+		int update_index_internal(const dnet_id &id, const dnet_raw_id &index, const ioremap::elliptics::data_pointer &data,
+			uint32_t action, uint32_t shard_id, uint32_t shard_count);
 
 	private:
 		void clear_queue(int *errp = NULL);
 
+		dnet_backend_io *m_backend;
+		dnet_net_state *m_state;
 		uint32_t m_ioflags;
 		uint64_t m_cflags;
-		dnet_net_state *m_state;
 };
 
 class elliptics_timer

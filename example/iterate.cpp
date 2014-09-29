@@ -36,7 +36,7 @@ struct Ctx {
 	dnet_iterator_range key_range;
 	dnet_time time_begin, time_end;
 	std::unique_ptr<ioremap::elliptics::session> session;
-	std::vector<std::pair<struct dnet_id, struct dnet_addr>> routes;
+	std::vector<dnet_route_entry> routes;
 };
 
 void iterate_node(Ctx &ctx, const dnet_addr &node) {
@@ -46,10 +46,11 @@ void iterate_node(Ctx &ctx, const dnet_addr &node) {
 		ranges.push_back(ctx.key_range);
 
 	dnet_id id;
+	memset(&id, 0, sizeof(id));
 	bool found = false;
 	for (auto it = ctx.routes.begin(), end = ctx.routes.end(); it != end; ++it) {
-		if (dnet_addr_equal(&it->second, &node)) {
-			id = it->first;
+		if (dnet_addr_equal(&it->addr, &node)) {
+			dnet_setup_id(&id, it->group_id, it->id.id);
 			found = true;
 			break;
 		}
@@ -72,8 +73,10 @@ void iterate_node(Ctx &ctx, const dnet_addr &node) {
 		          << ", key: "   << dnet_dump_id_len_raw(it->reply()->key.id, DNET_ID_SIZE, buffer)
 		          << ", flags: " << it->reply()->user_flags
 		          << ", ts: "    << it->reply()->timestamp.tsec << "/" << it->reply()->timestamp.tnsec
-		          << " size: "   << it->reply_data().size()
-		          << " data: "   << it->reply_data().to_string()
+			  << ", keys: "  << it->reply()->iterated_keys << "/" << it->reply()->total_keys
+			  << ", status: " << it->reply()->status
+		          << ", size: "   << it->reply_data().size()
+		          << ", data: "   << it->reply_data().to_string()
 		          << std::endl;
 	}
 }
@@ -99,8 +102,8 @@ void iterate_groups(Ctx &ctx) {
 	std::set<dnet_addr, less> addr_set;
 
 	for (auto it = ctx.routes.begin(), end = ctx.routes.end(); it != end; ++it) {
-		if (groups_set.find(it->first.group_id) != groups_set.end()) {
-			addr_set.insert(it->second);
+		if (groups_set.find(it->group_id) != groups_set.end()) {
+			addr_set.insert(it->addr);
 		}
 	}
 
@@ -157,7 +160,7 @@ dnet_addr parse_addr(const std::string& addr) {
 int main(int argc, char *argv[]) {
 	Ctx ctx;
 	std::string log_file;
-	int log_level;
+	dnet_log_level log_level;
 	std::vector<std::string> remotes;
 	boost::program_options::options_description desc("Usage");
 	bool iter_groups = false;
@@ -189,7 +192,7 @@ int main(int argc, char *argv[]) {
 		if (vm.count("group"))
 			ctx.groups = vm["group"].as<std::vector<int>>();
 		log_file = vm["log-file"].as<std::string>();
-		log_level = vm["log-level"].as<int>();
+		log_level = ioremap::elliptics::file_logger::parse_level(vm["log-level"].as<std::string>());
 		if (vm.count("remote"))
 			remotes = vm["remote"].as<std::vector<std::string>>();
 		if (vm.count("data"))
@@ -222,7 +225,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	ioremap::elliptics::file_logger logger(log_file.c_str(), log_level);
-	ioremap::elliptics::node node(logger);
+	ioremap::elliptics::node node(ioremap::elliptics::logger(logger, blackhole::log::attributes_t()));
 	for (auto it = remotes.begin(), end = remotes.end(); it != end; ++it) {
 		try {
 			node.add_remote(it->c_str());

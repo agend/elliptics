@@ -41,9 +41,7 @@ using namespace ioremap::elliptics;
 #define __unused	__attribute__ ((unused))
 #endif
 
-static struct dnet_log notify_logger;
-
-static int notify_complete(struct dnet_net_state *state,
+static int notify_complete(struct dnet_addr *addr __unused,
 			struct dnet_cmd *cmd,
 			void *priv)
 {
@@ -53,7 +51,7 @@ static int notify_complete(struct dnet_net_state *state,
 	struct timeval tv;
 	FILE *stream = reinterpret_cast<FILE*>(priv);
 
-	if (is_trans_destroyed(state, cmd))
+	if (is_trans_destroyed(cmd))
 		return 0;
 
 	if (cmd->size != sizeof(struct dnet_io_notification))
@@ -69,10 +67,11 @@ static int notify_complete(struct dnet_net_state *state,
 
 	dnet_convert_io_notification(io);
 
-	fprintf(stream, "%s: client: %s, size: %llu, offset: %llu, flags: 0x%x\n",
+	fprintf(stream, "%s: client: %s, size: %llu, offset: %llu, flags: %s\n",
 			dnet_dump_id_str(io->io.id), dnet_server_convert_dnet_addr(&io->addr),
 			(unsigned long long)io->io.size,
-			(unsigned long long)io->io.offset, io->io.flags);
+			(unsigned long long)io->io.offset,
+			dnet_flags_dump_ioflags(io->io.flags));
 	fflush(stream);
 
 	return 0;
@@ -102,16 +101,21 @@ int main(int argc, char *argv[])
 	const char *logfile = "/dev/stderr", *notify_file = "/dev/stdout";
 	FILE *notify;
 	std::vector<int> groups;
+	dnet_log_level log_level = DNET_LOG_INFO;
 
 	memset(&cfg, 0, sizeof(struct dnet_config));
 
 	cfg.wait_timeout = 60*60;
-	notify_logger.log_level = DNET_LOG_INFO;
 
 	while ((ch = getopt(argc, argv, "g:m:w:l:I:a:r:h")) != -1) {
 		switch (ch) {
 			case 'm':
-				notify_logger.log_level = strtoul(optarg, NULL, 0);
+				try {
+					log_level = file_logger::parse_level(optarg);
+				} catch (std::exception &exc) {
+					std::cerr << exc.what() << std::endl;
+					return -1;
+				}
 				break;
 			case 'w':
 				cfg.wait_timeout = atoi(optarg);
@@ -163,10 +167,10 @@ int main(int argc, char *argv[])
 	}
 
 	try {
-		file_logger log(logfile, DNET_LOG_INFO);
+		file_logger log(logfile, log_level);
 
-		node n(log, cfg);
-		n.add_remote(remote_addr, remote_port, remote_family);
+		node n(logger(log, blackhole::log::attributes_t()), cfg);
+		n.add_remote(address(remote_addr, remote_port, remote_family));
 
 		session s(n);
 

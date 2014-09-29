@@ -343,7 +343,7 @@ class slru_cache_t;
 
 class cache_manager {
 	public:
-		cache_manager(struct dnet_node *n);
+		cache_manager(dnet_backend_io *backend, dnet_node *n, const cache_config &config);
 
 		~cache_manager();
 
@@ -382,6 +382,7 @@ class cache_manager {
 		std::string stat_json() const;
 
 	private:
+		dnet_node *m_node;
 		std::vector<std::shared_ptr<slru_cache_t>> m_caches;
 		size_t m_max_cache_size;
 		size_t m_cache_pages_number;
@@ -405,13 +406,13 @@ public:
 
 		long vatime = m_timer.elapsed();
 		m_guard = std::move(std::unique_lock<T>(mutex));
-		int level = DNET_LOG_DEBUG;
+		dnet_log_level level = DNET_LOG_DEBUG;
 
 		if (m_timer.elapsed() > 100)
 			level = DNET_LOG_ERROR;
 
 		if (m_timer.elapsed() > 0) {
-			dnet_log(m_node, level, "%s: cache lock: constructor: vatime: %ld, total: %lld ms\n", m_name, vatime, m_timer.elapsed());
+			dnet_log(m_node, level, "%s: cache lock: constructor: vatime: %ld, total: %lld ms", m_name, vatime, m_timer.elapsed());
 		}
 
 		m_timer.restart();
@@ -431,13 +432,13 @@ public:
 	void lock()
 	{
 		m_guard.lock();
-		int level = DNET_LOG_DEBUG;
+		dnet_log_level level = DNET_LOG_DEBUG;
 
 		if (m_timer.elapsed() > 100)
 			level = DNET_LOG_ERROR;
 
 		if (m_timer.elapsed() > 0) {
-			dnet_log(m_node, level, "%s: cache lock: lock: %lld ms\n", m_name, m_timer.elapsed());
+			dnet_log(m_node, level, "%s: cache lock: lock: %lld ms", m_name, m_timer.elapsed());
 		}
 
 		m_timer.restart();
@@ -447,13 +448,13 @@ public:
 	{
 		m_guard.unlock();
 
-		int level = DNET_LOG_DEBUG;
+		dnet_log_level level = DNET_LOG_DEBUG;
 
 		if (m_timer.elapsed() > 100)
 			level = DNET_LOG_ERROR;
 
 		if (m_timer.elapsed() > 0) {
-			dnet_log(m_node, level, "%s: cache lock: unlock: %lld ms\n", m_name, m_timer.elapsed());
+			dnet_log(m_node, level, "%s: cache lock: unlock: %lld ms", m_name, m_timer.elapsed());
 		}
 		m_timer.restart();
 	}

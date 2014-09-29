@@ -69,14 +69,6 @@ enum elliptics_ioflags {
 	ioflags_cache_remove_from_disk = DNET_IO_FLAGS_CACHE_REMOVE_FROM_DISK,
 };
 
-enum elliptics_log_level {
-	log_level_data = DNET_LOG_DATA,
-	log_level_error = DNET_LOG_ERROR,
-	log_level_info = DNET_LOG_INFO,
-	log_level_notice = DNET_LOG_NOTICE,
-	log_level_debug = DNET_LOG_DEBUG,
-};
-
 enum elliptics_exceptions_policy {
 	policy_no_exceptions			= ioremap::elliptics::session::no_exceptions,
 	policy_throw_at_start			= ioremap::elliptics::session::throw_at_start,
@@ -91,7 +83,7 @@ enum elliptics_exceptions_policy {
 enum elliptics_config_flags {
 	config_flags_join_network		= DNET_CFG_JOIN_NETWORK,
 	config_flags_no_route_list		= DNET_CFG_NO_ROUTE_LIST,
-	config_flags_mix_stats			= DNET_CFG_MIX_STATES,
+	config_flags_mix_states			= DNET_CFG_MIX_STATES,
 	config_flags_no_csum			= DNET_CFG_NO_CSUM,
 	config_flags_randomize_states	= DNET_CFG_RANDOMIZE_STATES,
 };
@@ -131,13 +123,37 @@ dnet_config& dnet_config_config(dnet_config &config) {
 
 class elliptics_node_python : public node, public bp::wrapper<node> {
 	public:
-		elliptics_node_python(const logger &l)
-			: node(l) {}
+		elliptics_node_python(logger_base &l)
+			: node(logger(l, blackhole::log::attributes_t())) {}
 
-		elliptics_node_python(const logger &l, dnet_config &cfg)
-			: node(l, cfg) {}
+		elliptics_node_python(logger_base &l, dnet_config &cfg)
+			: node(logger(l, blackhole::log::attributes_t()), cfg) {}
 
 		elliptics_node_python(const node &n): node(n) {}
+
+		void add_remotes(const bp::api::object &remotes) {
+			auto remotes_len = bp::len(remotes);
+			std::vector<address> std_remotes;
+			std_remotes.reserve(remotes_len);
+
+			for (bp::stl_input_iterator<bp::tuple> it(remotes), end; it != end; ++it) {
+				bp::extract<std::string> get_host((*it)[0]);
+				bp::extract<int> get_port((*it)[1]);
+				bp::extract<int> get_family((*it)[2]);
+				std_remotes.emplace_back(get_host(), get_port(), get_family());
+			}
+
+			add_remote(std_remotes);
+		}
+};
+
+class elliptics_file_logger : public file_logger
+{
+public:
+	elliptics_file_logger(const char *file, int level)
+		: file_logger(file, dnet_log_level(level))
+	{
+	}
 };
 
 
@@ -195,11 +211,9 @@ void ios_base_failure_translator(const std::ios_base::failure &exc)
 	PyErr_SetString(PyExc_IOError, exc.what());
 }
 
-BOOST_PYTHON_MEMBER_FUNCTION_OVERLOADS(add_remote_overloads, add_remote, 2, 3);
-
-void logger_log(logger &log, const char *msg, int level)
+void logger_log(logger_base &log, int level, const char *msg)
 {
-	log.log(level, msg);
+	BH_LOG(log, dnet_log_level(level), "%s", msg);
 }
 
 void next_impl(bp::api::object &value, const bp::api::object &next)
@@ -277,23 +291,21 @@ BOOST_PYTHON_MODULE(core)
 	elliptics_error_translator error_translator;
 	error_translator.initialize();
 
-	bp::scope().attr("trace_bit") = uint64_t(DNET_TRACE_BIT);
-
 	bp::register_exception_translator<timeout_error>(error_translator);
 	bp::register_exception_translator<not_found_error>(error_translator);
 	bp::register_exception_translator<error>(error_translator);
 	bp::register_exception_translator<std::ios_base::failure>(ios_base_failure_translator);
 
-	bp::class_<logger, boost::noncopyable>("AbstractLogger")
-		.def("log", &logger::log, bp::args("log_level", "log_message"),
+	bp::class_<logger_base, boost::noncopyable>("AbstractLogger")
+		.def("log", logger_log, bp::args("log_level", "log_message"),
 		    "log(self, level, message)\n"
 		    "   logs a message with level\n\n"
 		    "   logger.log(elliptics.log_level.debug, \"We've got a problem\"")
 	;
 
-	bp::class_<file_logger, bp::bases<logger> > file_logger_class(
+	bp::class_<elliptics_file_logger, bp::bases<logger_base>, boost::noncopyable> file_logger_class(
 		"Logger", "File logger for using inside Elliptics client library",
-		bp::init<const char *, const uint32_t>(bp::args("log_file", "log_level"),
+		bp::init<const char *, int>(bp::args("log_file", "log_level"),
 		    "__init__(self, filename, log_level)\n"
 		    "    Initializes file logger by the specified file and level of verbosity\n\n"
 		    "    logger = elliptics.Logger(\"/dev/stderr\", elliptics.log_level.debug)"));
@@ -321,33 +333,29 @@ BOOST_PYTHON_MODULE(core)
 
 	bp::class_<elliptics_node_python>(
 	    "Node", "Node represents a connection with Elliptics.",
-	    bp::init<logger>(bp::arg("logger"),
+	    bp::init<logger_base &>(bp::arg("logger"),
 	        "__init__(self, logger)\n"
 	        "    Initializes node by the logger and dafault configuration\n\n"
 	        "    node = elliptics.Node(logger)"))
-		.def(bp::init<logger, dnet_config &>(bp::args("logger", "config"),
+		.def(bp::init<logger_base &, dnet_config &>(bp::args("logger", "config"),
 		     "__init__(self, logger, config)\n"
 		     "    Initializes node by the logger and custom configuration\n\n"
 		     "node = elliptics.Node(logger, config)"))
-		.def("add_remote", static_cast<void (node::*)(const char*, int, int)>(&node::add_remote),
-		     (bp::arg("addr"), bp::arg("port"), bp::arg("family") = AF_INET),
-		     "add_remote(addr, port, family=AF_INET)\n"
-		     "    Adds connection to Elliptics node\n"
-		     "    which located on address, port, family.\n"
-		     "    Throws exception if connection hasn't been established\n\n"
-		     "    node.add_remote(addr='host.com', port=1025, family=2)")
-		.def("add_remote", static_cast<void (node::*)(const char*)>(&node::add_remote),
-		     (bp::arg("addr")),
-		     "add_remote(addr)\n"
-		     "    Adds connection to Elliptics node which located on address.\n"
-		     "    addr is string in format 'host:port:family'.\n"
-		     "    Throws exception if connection hasn't been established\n\n"
-		     "    node.add_remote('host.com:1025:2')")
+		.def("add_remotes", &elliptics_node_python::add_remotes,
+		     (bp::arg("remotes")),
+		     "add_remotes(remotes)\n"
+		     "    Adds connections to Elliptics node\n"
+		     "    which located on remotes.\n\n"
+		     "    node.add_remotes(('host.com:1025:2'))")
 		.def("set_timeouts", static_cast<void (node::*)(const int, const int)>(&node::set_timeouts),
 		     (bp::arg("wait_timeout"), bp::arg("check_timeout")),
 		     "set_timeouts(wait_timeout, check_timeout)\n"
 		     "    Changes timeouts values\n\n"
 		     "    node.set_timeouts(wait_timeout=5, check_timeout=50)")
+		.def("set_keepalive", &node::set_keepalive,
+		     (bp::arg("idle"), bp::arg("cnt"), bp::arg("interval")),
+		     "set_keepalive(idle, cnt, interval)\n"
+		     "    Sets tcp keepalive parameters to connections\n")
 	;
 
 	bp::enum_<elliptics_iterator_flags>("iterator_flags",
@@ -412,18 +420,18 @@ BOOST_PYTHON_MODULE(core)
 		.value("cache_remove_from_disk", ioflags_cache_remove_from_disk)
 	;
 
-	bp::enum_<elliptics_log_level>("log_level",
+	bp::enum_<blackhole::defaults::severity>("log_level",
 	    "Different levels of verbosity elliptics logs:\n\n"
-	     "data\n    The level has very important data, practically nothing is written\n"
-	     "error\n    The level contains reports of the previous level and critical errors that materially affect the work\n"
+	     "error\n    The level contains critical errors that materially affect the work\n"
+	     "warning\n    The level contains reports of the previous level and warnings that may not affect the work\n"
 	     "info\n    The level contains reports of the previous level and messages about the time of the various operations\n"
 	     "notice\n    The level is considered to be the first level of debugging\n"
 	     "debug\n    The level includes all sort of information about errors and work")
-		.value("data", log_level_data)
-		.value("error", log_level_error)
-		.value("info", log_level_info)
-		.value("notice", log_level_notice)
-		.value("debug", log_level_debug)
+		.value("error", blackhole::defaults::severity::error)
+		.value("warning", blackhole::defaults::severity::warning)
+		.value("info", blackhole::defaults::severity::info)
+		.value("notice", blackhole::defaults::severity::notice)
+		.value("debug", blackhole::defaults::severity::debug)
 	;
 
 	bp::enum_<elliptics_exceptions_policy>("exceptions_policy",
@@ -445,13 +453,13 @@ BOOST_PYTHON_MODULE(core)
 	bp::enum_<elliptics_config_flags>("config_flags",
 	    "Bit flags which could be used at elliptics.Config.flags:\n\n"
 	    "no_route_list\n    Do not request route table from remote nodes\n"
-	    "mix_stats\n    Mix states according to their weights before reading data\n"
+	    "mix_states\n    Mix states according to their weights before reading data\n"
 	    "no_csum\n    Globally disable checksum verification and update\n"
 	    "randomize_states\n    Randomize states for read requests\n\n"
 	    "config.flags = elliptics.config_flags.mix_stats | elliptics.config_flags.randomize_states\n"
 	    )
 		.value("no_route_list", config_flags_no_route_list)
-		.value("mix_stats", config_flags_mix_stats)
+		.value("mix_states", config_flags_mix_states)
 		.value("no_csum", config_flags_no_csum)
 		.value("randomize_states", config_flags_randomize_states)
 	;

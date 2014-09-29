@@ -58,7 +58,7 @@ struct file_backend_root
 	int			defrag_percentage;
 	int			defrag_timeout;
 
-	struct dnet_log		*blog;
+	dnet_logger		*blog;
 	struct eblob_log	log;
 	struct eblob_backend	*meta;
 };
@@ -139,7 +139,7 @@ static int file_write_raw(struct file_backend_root *r, struct dnet_io_attr *io)
 	fd = open(file, oflags, 0644);
 	if (fd < 0) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: OPEN: %zd: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: OPEN: %zd: %s.",
 				dnet_dump_id_str(io->id), file, err, strerror(-err));
 		goto err_out_exit;
 	}
@@ -147,7 +147,7 @@ static int file_write_raw(struct file_backend_root *r, struct dnet_io_attr *io)
 	err = pwrite(fd, data, io->size, io->offset);
 	if (err != (ssize_t)io->size) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: WRITE: %zd: offset: %llu, size: %llu: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: WRITE: %zd: offset: %llu, size: %llu: %s.",
 			dnet_dump_id_str(io->id), file, err,
 			(unsigned long long)io->offset, (unsigned long long)io->size,
 			strerror(-err));
@@ -191,7 +191,7 @@ static int file_write(struct file_backend_root *r, void *state __unused, struct 
 	if (err < 0) {
 		if (errno != EEXIST) {
 			err = -errno;
-			dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: dir-create: %d: %s.\n",
+			dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: dir-create: %d: %s.",
 					dnet_dump_id(&cmd->id), dir, err, strerror(-err));
 			goto err_out_exit;
 		}
@@ -209,12 +209,12 @@ static int file_write(struct file_backend_root *r, void *state __unused, struct 
 	err = eblob_write(r->meta, &key, &ehdr, 0, ehdr_size, 0);
 
 	if (err) {
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: META WRITE: %d: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: META WRITE: %d: %s.",
 				dnet_dump_id(&cmd->id), dir, err, strerror(-err));
 		goto err_out_remove;
 	}
 
-	dnet_backend_log(r->blog, DNET_LOG_INFO, "%s: FILE: %s: WRITE: Ok: offset: %llu, size: %llu.\n",
+	dnet_backend_log(r->blog, DNET_LOG_INFO, "%s: FILE: %s: WRITE: Ok: offset: %llu, size: %llu.",
 			dnet_dump_id(&cmd->id), dir, (unsigned long long)io->offset, (unsigned long long)io->size);
 
 	if (io->flags & DNET_IO_FLAGS_WRITE_NO_FILE_INFO) {
@@ -259,7 +259,7 @@ static int file_read(struct file_backend_root *r, void *state, struct dnet_cmd *
 	fd = open(file, O_RDONLY | O_CLOEXEC, 0644);
 	if (fd < 0) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: READ: %d: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: READ: %d: %s.",
 				dnet_dump_id(&cmd->id), file, err, strerror(-err));
 		goto err_out_exit;
 	}
@@ -269,7 +269,7 @@ static int file_read(struct file_backend_root *r, void *state, struct dnet_cmd *
 	err = fstat(fd, &st);
 	if (err) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: read-stat: %d: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: read-stat: %d: %s.",
 				dnet_dump_id(&cmd->id), file, err, strerror(-err));
 		goto err_out_close_fd;
 	}
@@ -321,6 +321,8 @@ static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *
 	struct eblob_write_control wc;
 	struct eblob_key key;
 	struct dnet_ext_list elist;
+	struct stat st;
+	int64_t size;
 	static const size_t ehdr_size = sizeof(struct dnet_ext_list_hdr);
 
 	memcpy(key.id, cmd->id.id, EBLOB_ID_SIZE);
@@ -335,11 +337,21 @@ static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *
 	err = open(file, O_RDONLY | O_CLOEXEC);
 	if (err < 0) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-open-csum: %d: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-open: %d: %s.",
 			dnet_dump_id(&cmd->id), file, err, strerror(-err));
 		goto err_out_exit;
 	}
 	fd = err;
+
+	err = fstat(fd, &st);
+	if (err < 0) {
+		err = -errno;
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-stat: %d: %s.",
+			dnet_dump_id(&cmd->id), file, err, strerror(-err));
+		goto err_out_close;
+	}
+	size = st.st_size;
+
 
 	err = eblob_read_return(r->meta, &key, EBLOB_READ_NOCSUM, &wc);
 
@@ -348,22 +360,24 @@ static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *
 	}
 
 	if (err) {
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: meta-read-return: %d: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: meta-read-return: %d: %s.",
 			dnet_dump_id(&cmd->id), file, err, strerror(-err));
+		elist.timestamp.tsec = st.st_mtime;
+		elist.timestamp.tnsec = 0;
 	} else {
 		struct dnet_ext_list_hdr ehdr;
 
 		err = dnet_ext_hdr_read(&ehdr, wc.data_fd, wc.offset);
 
 		if (err) {
-			dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: meta-read-hdr: %d: %s.\n",
+			dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: meta-read-hdr: %d: %s.",
 				dnet_dump_id(&cmd->id), file, err, strerror(-err));
 		} else {
 			dnet_ext_hdr_to_list(&ehdr, &elist);
 		}
 	}
 
-	err = dnet_send_file_info_ts(state, cmd, fd, 0, -1, &elist.timestamp);
+	err = dnet_send_file_info_ts(state, cmd, fd, 0, size, &elist.timestamp);
 	if (err)
 		goto err_out_close;
 	
@@ -390,9 +404,6 @@ static int file_backend_command_handler(void *state, void *priv, struct dnet_cmd
 			break;
 		case DNET_CMD_READ:
 			err = file_read(r, state, cmd, data);
-			break;
-		case DNET_CMD_STAT:
-			err = backend_stat(r->blog, state, r->root, cmd);
 			break;
 		case DNET_CMD_DEL:
 			err = file_del(r, state, cmd, data);
@@ -484,7 +495,7 @@ static int dnet_file_set_root(struct dnet_config_backend *b, char *key __unused,
 	r->rootfd = open(r->root, O_RDONLY | O_CLOEXEC);
 	if (r->rootfd < 0) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to open root '%s': %s.\n", root, strerror(-err));
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to open root '%s': %s.", root, strerror(-err));
 		goto err_out_free;
 	}
 	r->root_len = strlen(r->root);
@@ -492,7 +503,7 @@ static int dnet_file_set_root(struct dnet_config_backend *b, char *key __unused,
 	err = fchdir(r->rootfd);
 	if (err) {
 		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to change current dir to root '%s' directory: %s.\n",
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to change current dir to root '%s' directory: %s.",
 				root, strerror(-err));
 		goto err_out_close;
 	}
@@ -509,32 +520,21 @@ err_out_exit:
 	return err;
 }
 
-int file_backend_storage_stat(void *priv, struct dnet_stat *st)
-{
-	int err;
-	struct file_backend_root *r = priv;
-
-	memset(st, 0, sizeof(struct dnet_stat));
-
-	err = backend_stat_low_level(r->blog, r->root ? r->root : ".", st);
-	if (err)
-		return err;
-
-	return 0;
-}
-
 static void dnet_file_db_cleanup(struct file_backend_root *r)
 {
 	eblob_cleanup(r->meta);
 }
 
-static int dnet_file_db_init(struct file_backend_root *r, struct dnet_config *c, const char *path)
+static int dnet_file_db_init(struct file_backend_root *r)
 {
 	static char meta_path[PATH_MAX];
 	struct eblob_config ecfg;
 	int err = 0;
 
-	snprintf(meta_path, sizeof(meta_path), "%s/meta", path);
+	snprintf(meta_path, sizeof(meta_path), "%s/history", r->root);
+	mkdir(meta_path, 0755);
+
+	snprintf(meta_path, sizeof(meta_path), "%s/history/meta", r->root);
 
 	memset(&ecfg, 0, sizeof(ecfg));
 	ecfg.file = meta_path;
@@ -544,12 +544,12 @@ static int dnet_file_db_init(struct file_backend_root *r, struct dnet_config *c,
 	ecfg.blob_size = r->blob_size;
 	ecfg.defrag_percentage = r->defrag_percentage;
 	ecfg.defrag_timeout = r->defrag_timeout;
-	ecfg.log = (struct eblob_log *)c->log;
+	ecfg.log = &r->log;
 
 	r->meta = eblob_init(&ecfg);
 	if (!r->meta) {
 		err = -EINVAL;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to initialize metadata eblob\n");
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to initialize metadata eblob");
 	}
 
 	return err;
@@ -574,27 +574,23 @@ static int file_backend_checksum(struct dnet_node *n, void *priv, struct dnet_id
 	return dnet_checksum_file(n, file, 0, 0, csum, *csize);
 }
 
-static int dnet_file_config_init(struct dnet_config_backend *b, struct dnet_config *c)
+static int dnet_file_config_init(struct dnet_config_backend *b)
 {
 	struct file_backend_root *r = b->data;
 	int err;
 
-	c->cb = &b->cb;
 	r->blog = b->log;
+	if (!r->bit_num)
+		r->bit_num = 16;
 
 	b->cb.command_private = r;
 
 	b->cb.command_handler = file_backend_command_handler;
 	b->cb.checksum = file_backend_checksum;
 
-	c->storage_size = b->storage_size;
-	c->storage_free = b->storage_free;
-
-	b->cb.storage_stat = file_backend_storage_stat;
 	b->cb.backend_cleanup = file_backend_cleanup;
 
-	mkdir("history", 0755);
-	err = dnet_file_db_init(r, c, "history");
+	err = dnet_file_db_init(r);
 	if (err)
 		return err;
 

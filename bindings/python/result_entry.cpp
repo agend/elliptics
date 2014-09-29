@@ -24,6 +24,7 @@
 #include "elliptics_id.h"
 #include "elliptics_time.h"
 #include "elliptics_io_attr.h"
+#include "py_converters.h"
 
 namespace bp = boost::python;
 
@@ -205,13 +206,7 @@ elliptics_id find_indexes_result_get_id(find_indexes_result_entry &result)
 
 bp::list find_indexes_result_get_indexes(find_indexes_result_entry &result)
 {
-	bp::list ret;
-
-	for (auto it = result.indexes.begin(), end = result.indexes.end(); it != end; ++it) {
-		ret.append(*it);
-	}
-
-	return ret;
+	return convert_to_list(result.indexes);
 }
 
 bool callback_result_is_valid(callback_result_entry &result)
@@ -222,6 +217,11 @@ bool callback_result_is_valid(callback_result_entry &result)
 bool callback_result_is_ack(callback_result_entry &result)
 {
 	return result.is_ack();
+}
+
+bool callback_result_is_final(callback_result_entry &result)
+{
+	return result.is_final();
 }
 
 int callback_result_status(callback_result_entry &result)
@@ -257,106 +257,32 @@ uint64_t callback_result_size(callback_result_entry &result)
 	return result.size();
 }
 
-dnet_stat stat_result_get_statistics(stat_result_entry &result)
-{
-	return *(result.statistics());
-}
-
 std::string monitor_stat_result_get_statistics(monitor_stat_result_entry &result) {
 	return result.statistics();
 }
 
-struct address_statistics {
-	address_statistics(const dnet_addr_stat *stat, int group_id)
-	: stat(stat)
-	, group_id(group_id)
-	{}
-
-	int num() { return stat->num; }
-	int cmd_num() { return stat->cmd_num; }
-
-	const dnet_addr_stat* stat;
-
-	int group_id;
-};
-
-address_statistics stat_count_result_get_statistics(stat_count_result_entry &result)
-{
-	return address_statistics(result.statistics(), result.command()->id.group_id);
+elliptics_id route_entry_get_id(const dnet_route_entry &entry) {
+	return elliptics_id(entry.id, entry.group_id);
 }
 
-std::string addr_stat_get_address(address_statistics &stat) {
-	return std::string(dnet_server_convert_dnet_addr(&stat.stat->addr));
+std::string route_entry_get_address(const dnet_route_entry &entry) {
+	return std::string(dnet_server_convert_dnet_addr(&entry.addr));
 }
 
-bp::dict addr_stat_get_counters(address_statistics &stat) {
-	bp::dict node_stat, storage_commands, proxy_commands, counters;
-	auto as = stat.stat;
-
-	for (int i = 0; i < as->num; ++i) {
-		if (i < as->cmd_num) {
-			storage_commands[std::string(dnet_counter_string(i, as->cmd_num))] =
-			    bp::make_tuple((unsigned long long)as->count[i].count,
-			                   (unsigned long long)as->count[i].err);
-		} else if (i < (as->cmd_num * 2)) {
-			proxy_commands[std::string(dnet_counter_string(i, as->cmd_num))] =
-			    bp::make_tuple((unsigned long long)as->count[i].count,
-			                   (unsigned long long)as->count[i].err);
-		} else {
-			counters[std::string(dnet_counter_string(i, as->cmd_num))] =
-			    bp::make_tuple((unsigned long long)as->count[i].count,
-			                   (unsigned long long)as->count[i].err);
-		}
-	}
-
-	node_stat["storage_commands"] = storage_commands;
-	node_stat["proxy_commands"] = proxy_commands;
-	node_stat["counters"] = counters;
-
-	return node_stat;
+elliptics_time dnet_backend_status_get_last_start(const dnet_backend_status &result) {
+	return elliptics_time(result.last_start);
 }
 
-bp::list dnet_stat_get_la(const dnet_stat &stat)
-{
+bool dnet_backend_status_get_read_only(const dnet_backend_status &result) {
+	return bool(result.read_only);
+}
+
+bp::list dnet_backend_status_result_get_backends(const backend_status_result_entry &result) {
 	bp::list ret;
-	for (uint8_t i = 0; i < 3; ++i) {
-		ret.append(stat.la[i]);
+
+	for (size_t i = 0; i < result.count(); ++i) {
+		ret.append(result.backend(i));
 	}
-	return ret;
-}
-
-std::string dnet_stat_to_str(const dnet_stat &stat)
-{
-	char output[1024];
-
-	float la[3];
-
-	for (uint8_t i = 0; i < 3; ++i) {
-		la[i] = (float)stat.la[i] / 100.0;
-	}
-
-
-	auto nchar = sprintf(output, "la: %3.2f %3.2f %3.2f\n"
-	                     "mem: total: %8llu kB, free: %8llu kB, "
-	                     "cache: %8llu kB, buffers: %8llu, "
-	                     "active: %8llu, inactive: %8llu\n"
-	                     "fs: total: %8llu mB, avail: %8llu/%8llu mB",
-	                     la[0], la[1], la[2],
-	                     (unsigned long long)stat.vm_total, (unsigned long long)stat.vm_free,
-	                     (unsigned long long)stat.vm_cached, (unsigned long long)stat.vm_buffers,
-	                     (unsigned long long)stat.vm_active, (unsigned long long)stat.vm_inactive,
-	                     (unsigned long long)(stat.frsize * stat.blocks / 1024 / 1024),
-	                     (unsigned long long)(stat.bavail * stat.bsize / 1024 / 1024),
-	                     (unsigned long long)(stat.bfree * stat.bsize / 1024 / 1024));
-	return std::string(output, nchar);
-}
-
-std::string dnet_stat_to_repr(const dnet_stat &stat)
-{
-	std::string ret = "< Statistics:\n";
-
-	ret += dnet_stat_to_str(stat);
-	ret += "\n>";
 
 	return ret;
 }
@@ -475,7 +401,8 @@ void init_result_entry() {
 
 	bp::class_<callback_result_entry>("CallbackResultEntry")
 		.add_property("is_valid", callback_result_is_valid)
-		.add_property("is_ask", callback_result_is_ack)
+		.add_property("is_ack", callback_result_is_ack)
+		.add_property("is_final", callback_result_is_final)
 		.add_property("status", callback_result_status)
 		.add_property("data", callback_result_data)
 		.add_property("size", callback_result_size)
@@ -484,64 +411,31 @@ void init_result_entry() {
 		.add_property("group_id", result_entry_group_id<callback_result_entry>)
 	;
 
-	bp::class_<dnet_stat>("Statisitics", bp::no_init)
-		.add_property("la", dnet_stat_get_la, "Load average on the node")
-		.add_property("bsize", &dnet_stat::bsize, "Block size")
-		.add_property("frsize", &dnet_stat::frsize, "Fragment size")
-		.add_property("blocks", &dnet_stat::blocks, "Filesystem size in frsize units")
-		.add_property("bfree", &dnet_stat::bfree, "Free blocks")
-		.add_property("bavail", &dnet_stat::bavail, "Free blocks for non-root")
-		.add_property("files", &dnet_stat::files, "Inodes")
-		.add_property("ffree", &dnet_stat::ffree, "Free inodes")
-		.add_property("favail", &dnet_stat::favail, "Free inodes for non-root")
-		.add_property("fsid", &dnet_stat::fsid, "File system ID")
-		.add_property("flag", &dnet_stat::flag, "Mount flags")
-		.add_property("vm_active", &dnet_stat::vm_active, "Virtual memory which is active")
-		.add_property("vm_inactive", &dnet_stat::vm_inactive, "Virtual memory which is inactive")
-		.add_property("vm_total", &dnet_stat::vm_total, "Total size of virtual memory")
-		.add_property("vm_free", &dnet_stat::vm_free, "Size of free virtual memory")
-		.add_property("vm_cached", &dnet_stat::vm_cached, "Virtual memory which is cached")
-		.add_property("vm_buffers", &dnet_stat::vm_buffers, "Virtual memory which is buffered")
-		.add_property("node_files", &dnet_stat::node_files, "Objects on the node")
-		.add_property("node_files_removed", &dnet_stat::node_files_removed, "Objects on the node which marked as deleted")
-		.def("__str__", dnet_stat_to_str)
-		.def("__repr__", dnet_stat_to_repr)
-	;
-
-	bp::class_<stat_result_entry>("StatResultEntry")
-		.add_property("statistics", stat_result_get_statistics,
-		              "virtual memory and file system utilization statistics as elliptics.Statisitics")
-		.add_property("address", result_entry_address<stat_result_entry>,
-		              "elliptics.Address of the node which the statistics are belong")
-		.add_property("group_id", result_entry_group_id<stat_result_entry>)
-		.add_property("error", result_entry_error<stat_result_entry>,
-		              "information about error")
-	;
-
-	bp::class_<address_statistics>("AddressStatistics", bp::no_init)
-		.add_property("address", addr_stat_get_address,
-		              "elliptics.Address of the client node from which the statistics was requested")
-		.add_property("group_id", &address_statistics::group_id)
-		.add_property("counters", addr_stat_get_counters,
-		              "Python dict of operations counters statistics")
-	;
-
-	bp::class_<stat_count_result_entry>("StatCountResultEntry")
-		.add_property("statistics", stat_count_result_get_statistics,
-		              "Operations statistics as elliptics.AddressStatistics")
-		.add_property("address", result_entry_address<stat_count_result_entry>,
-		              "elliptics.Address of the node which the statistics are belonged")
-		.add_property("group_id", result_entry_group_id<stat_count_result_entry>)
-		.add_property("error", result_entry_error<stat_count_result_entry>,
-		              "elliptics.Error information")
-	;
-
 	bp::class_<monitor_stat_result_entry>("MonitorStatResultEntry")
 		.add_property("statistics", monitor_stat_result_get_statistics)
 		.add_property("address", result_entry_address<monitor_stat_result_entry>)
 		.add_property("group_id", result_entry_group_id<monitor_stat_result_entry>)
 		.add_property("error", result_entry_error<monitor_stat_result_entry>,
 		              "elliptics.Error information")
+	;
+
+	bp::class_<dnet_route_entry>("RouteEntry")
+		.add_property("id", route_entry_get_id)
+		.add_property("address", route_entry_get_address)
+		.add_property("backend_id", &dnet_route_entry::backend_id)
+	;
+
+	bp::class_<backend_status_result_entry>("BackendStatusResultEntry")
+		.add_property("backends", &dnet_backend_status_result_get_backends)
+	;
+
+	bp::class_<dnet_backend_status>("BackendStatus")
+		.add_property("backend_id", &dnet_backend_status::backend_id)
+		.add_property("state", &dnet_backend_status::state)
+		.add_property("defrag_state", &dnet_backend_status::defrag_state)
+		.add_property("last_start", dnet_backend_status_get_last_start)
+		.add_property("last_start_err", &dnet_backend_status::last_start_err)
+		.add_property("read_only", dnet_backend_status_get_read_only)
 	;
 
 }

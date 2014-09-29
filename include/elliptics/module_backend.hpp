@@ -21,7 +21,7 @@ public:
 	virtual int file_info(module_backend_t *r, void *state, dnet_cmd *cmd)=0;
 	virtual int file_del(module_backend_t *r, void *state, dnet_cmd *cmd)=0;
 	virtual int file_bulk_read(module_backend_t *r, void *state, dnet_cmd *cmd, void *data)=0;
-	virtual int file_iterator(dnet_iterator_ctl *ictl)=0;
+	virtual int file_iterator(struct dnet_iterator_ctl *ictl, struct dnet_iterator_request *ireq, struct dnet_iterator_range *irange)=0;
 	virtual ~honest_command_handler() {};
 };
 
@@ -39,11 +39,11 @@ public:
 	virtual ~uncomplicated_handler() {};
 };
 
-module_backend_api_t * setup_handler(struct dnet_log *log, std::unique_ptr<honest_command_handler> honest_command_handler);
-module_backend_api_t * setup_handler(struct dnet_log *log, std::unique_ptr<uncomplicated_handler> uncomplicated_handler);
+module_backend_api_t * setup_handler(dnet_logger *log, std::unique_ptr<honest_command_handler> honest_command_handler);
+module_backend_api_t * setup_handler(dnet_logger *log, std::unique_ptr<uncomplicated_handler> uncomplicated_handler);
 
 template<typename T>
-T decorate_exception(struct dnet_log *log, std::function<T()> function, const T &error_value)
+T decorate_exception(dnet_logger *log, std::function<T()> function, const T &error_value)
 {
 	try {
 		return function();
