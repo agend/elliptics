@@ -261,10 +261,6 @@ class session
 		 * Makes dnet_id be accessible by key::id() in the key \a id.
 		 */
 		void			transform(const key &id) const;
-		/*!
-		 * Converts uint64_t original id  \a to dnet_id \a id.
-		 */
-		void			transform(dnet_id &id, const uint64_t &original_id) const;
 
 		/*!
 		 * Sets \a groups to the session.
@@ -429,11 +425,6 @@ class session
 		 * Groups are generated automatically by session::mix_states().
 		 */
 		async_read_result read_data(const key &id, uint64_t offset, uint64_t size);
-		/*!
-		 * \overload read_data(const key &id, uint64_t offset, uint64_t size)
-		 * Read by original id uint64_t
-		 */
-		async_read_result read_data_by_original_id(const uint64_t &id);
 
 		/*!
 		 * Filters the list \a groups and leaves only ones with the latest
@@ -485,13 +476,6 @@ class session
 		 */
 		async_write_result write_data(const key &id, const data_pointer &file, uint64_t remote_offset, uint64_t chunk_size);
 		
-		/*!
-		 * Writes data \a to server by the uint64_t id \a and
-		 *
-		 * Returns async_write_result
-		 */
-		async_write_result write_data_by_original_id(const uint64_t &id, const void *data, uint64_t size);
-
 		/*!
 		 * Reads data by \a id and passes it through \a converter. If converter returns the same data
 		 * it's threated as data is already up-to-date, othwerwise low-level write-cas with proper
@@ -583,13 +567,6 @@ class session
 		 * Returns async_lookup_result.
 		 */
 		async_lookup_result parallel_lookup(const key &id);
-
-		/*!
-		 * Removes all the entries of key \a original_id at server nodes.
-		 *
-		 * Returns async_remove_result.
-		 */
-		async_remove_result remove_by_original_id(const uint64_t &original_id);
 
 		/*!
 		 * Lookups information for key \a id, picks lookup_result_enties by following rules:
@@ -921,7 +898,33 @@ class session
 		 * Returns pointer to dnet_session.
 		 */
 		dnet_session *	get_native();
+		
+		// Original ID modification		
+		/*!
+		 * Converts uint64_t original id  \a to dnet_id \a id.
+		 */
+		void			transform(dnet_id &id, const uint64_t &original_id) const;
 
+		/*!
+		 * \overload read_data(const key &id, uint64_t offset, uint64_t size)
+		 * Read by original id uint64_t
+		 */
+		async_read_result read_data_by_original_id(const uint64_t &id);
+		
+		/*!
+		 * Writes data \a to server by the uint64_t id \a and
+		 *
+		 * Returns async_write_result
+		 */
+		async_write_result write_data_by_original_id(const uint64_t &id, const void *data, uint64_t size);
+		
+		/*!
+		 * Removes all the entries of key \a original_id at server nodes.
+		 *
+		 * Returns async_remove_result.
+		 */
+		async_remove_result remove_by_original_id(const uint64_t &original_id);
+		
 	protected:
 		std::shared_ptr<session_data>		m_data;
 
