@@ -2610,6 +2610,20 @@ dnet_session *session::get_native()
 }
 
 // Original ID customisation
+void session::transform(dnet_id &id, const uint64_t &original_id) const
+{	
+	uint8_t tmp[sizeof(uint64_t)];
+	uint8_t *original_id_addr = (uint8_t *)&original_id;
+	uint8_t i = 0;
+	for(; i < sizeof (uint64_t); i++)
+	{
+		tmp[i] = original_id_addr[sizeof (uint64_t) - 1 - i];
+	}
+
+	transform(data_pointer::from_raw(tmp, sizeof(uint64_t)), id);
+	memcpy(id.id + DNET_ID_SIZE - sizeof (uint64_t), tmp, sizeof (uint64_t));
+}
+
 async_read_result session::read_data_by_original_id(const uint64_t &original_id)
 {
 	dnet_id raw;
@@ -2617,34 +2631,7 @@ async_read_result session::read_data_by_original_id(const uint64_t &original_id)
 
 	key id(raw);
 
-	async_read_result result(*this);
-	dnet_io_control control;
-	memset(&control, 0, sizeof(control));
-
-	control.fd = -1;
-	control.cmd = DNET_CMD_READ;
-	control.cflags = DNET_FLAGS_NEED_ACK | get_cflags();
-
-	dnet_io_attr io;
-	memset(&io, 0, sizeof(io));
-
-	io.size   = 0;
-	io.offset = 0;
-	io.flags  = get_ioflags();
-
-	memcpy(io.id, id.id().id, DNET_ID_SIZE);
-	memcpy(io.parent, id.id().id, DNET_ID_SIZE);
-
-	memcpy(&control.io, &io, sizeof(dnet_io_attr));
-
-	auto cb = createCallback<read_callback>(*this, result, control);
-	cb->kid = id;
-
-	DNET_SESSION_GET_GROUPS(async_read_result);
-	cb->groups = std::move(groups);
-
-	startCallback(cb);
-	return result;
+	return read_data(id, 0, 0);
 }
 
 async_write_result session::write_data_by_original_id(const uint64_t &id, const void *data, uint64_t size)
@@ -2671,20 +2658,6 @@ async_write_result session::write_data_by_original_id(const uint64_t &id, const 
 	return write_data(ctl);
 }
 
-void session::transform(dnet_id &id, const uint64_t &original_id) const
-{	
-	uint8_t tmp[sizeof(uint64_t)];
-	uint8_t *original_id_addr = (uint8_t *)&original_id;
-	uint8_t i = 0;
-	for(; i < sizeof (uint64_t); i++)
-	{
-		tmp[i] = original_id_addr[sizeof (uint64_t) - 1 - i];
-	}
-
-	transform(data_pointer::from_raw(tmp, sizeof(uint64_t)), id);
-	memcpy(id.id + DNET_ID_SIZE - sizeof (uint64_t), tmp, sizeof (uint64_t));
-}
-
 async_remove_result session::remove_by_original_id(const uint64_t &original_id)
 {
 	dnet_id raw;
@@ -2692,11 +2665,7 @@ async_remove_result session::remove_by_original_id(const uint64_t &original_id)
 
 	key id(raw);
 
-	async_remove_result result(*this);
-	auto cb = createCallback<remove_callback>(*this, result, id.id());
-
-	startCallback(cb);
-	return result;
+	return remove(id);
 }
 
 } } // namespace ioremap::elliptics
