@@ -2,17 +2,17 @@
  * Copyright 2008+ Evgeniy Polyakov <zbr@ioremap.net>
  *
  * This file is part of Elliptics.
- * 
+ *
  * Elliptics is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * Elliptics is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with Elliptics.  If not, see <http://www.gnu.org/licenses/>.
  */
@@ -46,7 +46,7 @@
 
 #include "common.h"
 
-#include "react/elliptics_react.h"
+#include "monitor/measure_points.h"
 
 /*
  * FIXME: __unused is used internally by glibc, so it may cause conflicts.
@@ -141,8 +141,6 @@ err:
 static int blob_write(struct eblob_backend_config *c, void *state,
 		struct dnet_cmd *cmd, void *data)
 {
-	react_start_action(ACTION_BACKEND_EBLOB_WRITE);
-
 	struct dnet_ext_list elist;
 	struct dnet_io_attr *io = data;
 	struct eblob_backend *b = c->eblob;
@@ -260,15 +258,12 @@ static int blob_write(struct eblob_backend_config *c, void *state,
 
 err_out_exit:
 	dnet_ext_list_destroy(&elist);
-	react_stop_action(ACTION_BACKEND_EBLOB_WRITE);
 	return err;
 }
 
 
 static int blob_read(struct eblob_backend_config *c, void *state, struct dnet_cmd *cmd, void *data, int last)
 {
-	react_start_action(ACTION_BACKEND_EBLOB_READ);
-
 	struct dnet_ext_list elist;
 	struct dnet_io_attr *io = data;
 	struct eblob_backend *b = c->eblob;
@@ -322,21 +317,10 @@ static int blob_read(struct eblob_backend_config *c, void *state, struct dnet_cm
 		offset += sizeof(struct dnet_ext_list_hdr);
 	}
 
-	io->total_size = size;
-
-	if (io->offset) {
-		if (io->offset >= size) {
-			err = -E2BIG;
-			goto err_out_exit;
-		}
-		offset += io->offset;
-		size -= io->offset;
+	err = dnet_backend_check_get_size(io, &offset, &size);
+	if (err) {
+		goto err_out_exit;
 	}
-
-	if (io->size != 0 && size > io->size)
-		size = io->size;
-	else
-		io->size = size;
 
 	if (size && last)
 		cmd->flags &= ~DNET_FLAGS_NEED_ACK;
@@ -411,7 +395,6 @@ static int blob_read(struct eblob_backend_config *c, void *state, struct dnet_cm
 
 err_out_exit:
 	dnet_ext_list_destroy(&elist);
-	react_stop_action(ACTION_BACKEND_EBLOB_READ);
 	return err;
 }
 
@@ -555,9 +538,6 @@ err_out_exit:
 
 static int blob_read_range(struct eblob_backend_config *c, void *state, struct dnet_cmd *cmd, void *data)
 {
-	int action_code = (cmd->cmd == DNET_CMD_READ_RANGE) ? ACTION_BACKEND_EBLOB_READ_RANGE : ACTION_BACKEND_EBLOB_DEL_RANGE;
-	react_start_action(action_code);
-
 	struct eblob_read_range_priv p;
 	struct dnet_io_attr *io = data;
 	struct eblob_backend *b = c->eblob;
@@ -645,14 +625,11 @@ err_out_exit:
 	if (p.keys)
 		free(p.keys);
 
-	react_stop_action(action_code);
 	return err;
 }
 
 static int blob_del(struct eblob_backend_config *c, struct dnet_cmd *cmd)
 {
-	react_start_action(ACTION_BACKEND_EBLOB_DEL);
-
 	struct eblob_key key;
 	int err;
 
@@ -665,14 +642,11 @@ static int blob_del(struct eblob_backend_config *c, struct dnet_cmd *cmd)
 			dnet_dump_id_str(cmd->id.id), err, strerror(-err));
 	}
 
-	react_stop_action(ACTION_BACKEND_EBLOB_DEL);
 	return err;
 }
 
 static int blob_file_info(struct eblob_backend_config *c, void *state, struct dnet_cmd *cmd)
 {
-	react_start_action(ACTION_BACKEND_EBLOB_FILE_INFO);
-
 	struct eblob_backend *b = c->eblob;
 	struct eblob_key key;
 	struct eblob_write_control wc;
@@ -728,7 +702,6 @@ static int blob_file_info(struct eblob_backend_config *c, void *state, struct dn
 
 err_out_exit:
 	dnet_ext_list_destroy(&elist);
-	react_stop_action(ACTION_BACKEND_EBLOB_FILE_INFO);
 	return err;
 }
 
@@ -779,22 +752,18 @@ int blob_defrag_status(void *priv)
 
 int blob_defrag_start(void *priv)
 {
-	react_start_action(ACTION_BACKEND_EBLOB_START_DEFRAG);
-
 	struct eblob_backend_config *c = priv;
 
 	int err = eblob_start_defrag(c->eblob);
 
 	dnet_backend_log(c->blog, DNET_LOG_INFO, "DEFRAG: defragmetation request: status: %d", err);
 
-	react_stop_action(ACTION_BACKEND_EBLOB_START_DEFRAG);
-
 	return err;
 }
 
 static int eblob_backend_command_handler(void *state, void *priv, struct dnet_cmd *cmd, void *data)
 {
-	react_start_action(ACTION_BACKEND_EBLOB);
+	FORMATTED(HANDY_TIMER_SCOPE, ("eblob_backend.cmd.%s", dnet_cmd_string(cmd->cmd)));
 
 	int err;
 	struct eblob_backend_config *c = priv;
@@ -821,7 +790,6 @@ static int eblob_backend_command_handler(void *state, void *priv, struct dnet_cm
 			break;
 	}
 
-	react_stop_action(ACTION_BACKEND_EBLOB);
 	return err;
 }
 

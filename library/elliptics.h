@@ -420,42 +420,18 @@ struct dnet_work_io {
 
 struct list_stat {
 	uint64_t		list_size;
-	uint64_t		volume;
-	uint64_t		min_list_size;
-	uint64_t		max_list_size;
-	struct timeval	time_base;
 };
 
 static inline void list_stat_init(struct list_stat *st) {
 	st->list_size = 0ULL;
-	st->volume = 0ULL;
-	st->min_list_size = ~0ULL;
-	st->max_list_size = 0ULL;
-
-	gettimeofday(&st->time_base, NULL);
 }
 
 static inline void list_stat_size_increase(struct list_stat *st, int num) {
 	st->list_size += num;
-
-	st->volume += num;
-	if (st->list_size > st->max_list_size)
-		st->max_list_size = st->list_size;
 }
 
 static inline void list_stat_size_decrease(struct list_stat *st, int num) {
 	st->list_size -= num;
-
-	if (st->list_size < st->min_list_size)
-		st->min_list_size = st->list_size;
-}
-
-static inline void list_stat_reset(struct list_stat *st, struct timeval *time) {
-	st->volume = 0ULL;
-	st->min_list_size = ~0ULL;
-	st->max_list_size = 0ULL;
-	st->time_base.tv_sec = time->tv_sec;
-	st->time_base.tv_usec = time->tv_usec;
 }
 
 struct dnet_backend_io;
@@ -526,7 +502,6 @@ struct dnet_io {
 };
 
 int dnet_state_accept_process(struct dnet_net_state *st, struct epoll_event *ev);
-int dnet_state_net_process(struct dnet_net_state *st, struct epoll_event *ev);
 int dnet_io_init(struct dnet_node *n, struct dnet_config *cfg);
 void *dnet_io_process(void *data_);
 int dnet_server_io_init(struct dnet_node *n);
@@ -681,8 +656,6 @@ struct dnet_node
 	pthread_mutex_t		iterator_lock;
 
 	void			*monitor;
-
-	void			*react_aggregator;
 
 	struct dnet_config_data *config_data;
 };
@@ -852,7 +825,7 @@ void dnet_trans_remove_timer_nolock(struct dnet_net_state *st, struct dnet_trans
 
 void dnet_trans_remove(struct dnet_trans *t);
 
-void dnet_trans_clean_list(struct list_head *head);
+void dnet_trans_clean_list(struct list_head *head, int error);
 int dnet_trans_iterate_move_transaction(struct dnet_net_state *st, struct list_head *head);
 int dnet_state_reset_nolock_noclean(struct dnet_net_state *st, int error, struct list_head *head);
 

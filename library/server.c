@@ -171,6 +171,11 @@ struct dnet_node *dnet_server_node_create(struct dnet_config_data *cfg_data)
 			goto err_out_state_destroy;
 		}
 
+		// @dnet_state_create() returns state pointer which holds 2 references - one for originally created state
+		// and another for caller in case he wants to do something with the state. The first reference is owned
+		// by network thread given state was attached to, and it can already release it.
+		dnet_state_put(n->st);
+
 		err = dnet_backend_init_all(n);
 		if (err) {
 			dnet_log(n, DNET_LOG_ERROR, "failed to init backends: %s %d", strerror(-err), err);
@@ -223,6 +228,11 @@ void dnet_server_node_destroy(struct dnet_node *n)
 	dnet_log(n, DNET_LOG_DEBUG, "Destroying server node.");
 
 	/*
+	 * Monitor uses all others, so it should be stopped at first.
+	 */
+	dnet_monitor_exit(n);
+
+	/*
 	 * Cache can be accessed from the io threads, so firstly stop them.
 	 * Cache uses backend to dump all ansynced data to the disk, so
 	 * backend must be destroyed the last.
@@ -245,8 +255,6 @@ void dnet_server_node_destroy(struct dnet_node *n)
 
 	if (n->config_data)
 		n->config_data->destroy_config_data(n->config_data);
-
-	dnet_monitor_exit(n);
 
 	free(n);
 }

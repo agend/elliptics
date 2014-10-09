@@ -1,6 +1,5 @@
 #include "route.h"
 #include "elliptics.h"
-#include <react/elliptics_react.hpp>
 #include <elliptics/utils.hpp>
 
 static int dnet_cmd_reverse_lookup(struct dnet_net_state *st, struct dnet_cmd *cmd, void *data __unused)
@@ -14,12 +13,14 @@ static int dnet_cmd_reverse_lookup(struct dnet_net_state *st, struct dnet_cmd *c
 	dnet_indexes_shard_count_decode(&cmd->id, &indexes_shard_count);
 	memcpy(st->version, version, sizeof(st->version));
 
-	dnet_version_encode(&cmd->id);
-	dnet_indexes_shard_count_encode(&cmd->id, n->indexes_shard_count);
-
+	/* check received version at first and if it is ok - send self version */
 	err = dnet_version_check(st, version);
 	if (err)
 		goto err_out_exit;
+
+	/* send self version only if client has right version */
+	dnet_version_encode(&cmd->id);
+	dnet_indexes_shard_count_encode(&cmd->id, n->indexes_shard_count);
 
 	dnet_log(n, DNET_LOG_INFO, "%s: reverse lookup command: client indexes shard count: %d, server indexes shard count: %d",
 			dnet_state_dump_addr(st),
@@ -275,14 +276,12 @@ int dnet_route_list::disable_backend(size_t backend_id)
 
 int dnet_route_list::on_reverse_lookup(dnet_net_state *st, dnet_cmd *cmd, void *data)
 {
-	react::action_guard action_guard(ACTION_DNET_CMD_REVERSE_LOOKUP);
 	std::lock_guard<std::mutex> lock_guard(m_mutex);
 	return dnet_cmd_reverse_lookup(st, cmd, data);
 }
 
 int dnet_route_list::on_join(dnet_net_state *st, dnet_cmd *cmd, void *data)
 {
-	react::action_guard action_guard(ACTION_DNET_CMD_JOIN_CLIENT);
 	return dnet_cmd_join_client(st, cmd, data);
 }
 

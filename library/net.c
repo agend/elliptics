@@ -2,17 +2,17 @@
  * Copyright 2008+ Evgeniy Polyakov <zbr@ioremap.net>
  *
  * This file is part of Elliptics.
- * 
+ *
  * Elliptics is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * Elliptics is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with Elliptics.  If not, see <http://www.gnu.org/licenses/>.
  */
@@ -33,6 +33,8 @@
 #include "elliptics.h"
 #include "elliptics/packet.h"
 #include "elliptics/interface.h"
+
+#include "../monitor/measure_points.h"
 
 #ifndef POLLRDHUP
 #define POLLRDHUP 0x2000
@@ -611,6 +613,8 @@ int dnet_process_recv(struct dnet_backend_io *backend, struct dnet_net_state *st
 		uint64_t tid = cmd->trans;
 		uint64_t flags = cmd->flags;
 
+		HANDY_COUNTER_INCREMENT("io.replies", 1);
+
 		pthread_mutex_lock(&st->trans_lock);
 		t = dnet_trans_search(st, tid);
 		if (t) {
@@ -686,6 +690,7 @@ int dnet_process_recv(struct dnet_backend_io *backend, struct dnet_net_state *st
 	if (!forward_state || forward_state == st || forward_state == n->st) {
 		dnet_state_put(forward_state);
 
+		HANDY_COUNTER_INCREMENT("io.cmds", 1);
 		err = dnet_process_cmd_raw(backend, st, cmd, r->data, 0);
 	} else {
 		if (!forward_state) {
@@ -693,6 +698,7 @@ int dnet_process_recv(struct dnet_backend_io *backend, struct dnet_net_state *st
 			goto err_out_put_forward;
 		}
 
+		HANDY_COUNTER_INCREMENT("io.forwards", 1);
 		err = dnet_trans_forward(r, st, forward_state);
 		if (err)
 			goto err_out_put_forward;
@@ -774,7 +780,7 @@ void dnet_state_reset(struct dnet_net_state *st, int error)
 	dnet_state_reset_nolock_noclean(st, error, &head);
 	pthread_mutex_unlock(&st->n->state_lock);
 
-	dnet_trans_clean_list(&head);
+	dnet_trans_clean_list(&head, error);
 }
 
 
@@ -858,9 +864,11 @@ static int dnet_auth_complete(struct dnet_addr *addr, struct dnet_cmd *cmd, void
 			return 0;
 		}
 
-		dnet_log(n, DNET_LOG_ERROR, "%s: authentication request failed: %d", dnet_server_convert_dnet_addr(addr), cmd->status);
-
 		state = dnet_state_search_by_addr(n, addr);
+
+		dnet_log(n, DNET_LOG_ERROR, "%s: authentication request failed: %d, state to reset: %p",
+				dnet_server_convert_dnet_addr(addr), cmd->status, state);
+
 		if (state) {
 			state->__join_state = 0;
 			dnet_state_reset(state, -ECONNRESET);
@@ -1119,10 +1127,18 @@ struct dnet_net_state *dnet_state_create(struct dnet_node *n,
 		if (!err)
 			err = -ECONNRESET;
 	}
-	dnet_state_put(st);
 
-	if (err)
+	// do not release state if everything is ok
+	// library/net.cpp:907 will use state to request route table from remote node and so on
+	// but since state has been added into the route table it is not owned by 'creating' thread anymore,
+	// in particular connection can be reset, network thread will pick up reset epoll event and call
+	// dnet_state_reset() which will eventually kill state, while 'creating' thread is still using its pointer
+	//
+	// 'creating' thread must release state after it finished with it
+	if (err) {
+		dnet_state_put(st);
 		goto err_out_exit;
+	}
 
 	return st;
 

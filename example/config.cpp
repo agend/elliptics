@@ -12,7 +12,7 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with Elliptics.  If not, see <http://www.gnu.org/licenses/>.
  */
@@ -104,7 +104,13 @@ static void parse_logger(config_data *data, const config &logger)
 
 	// Available logging sinks.
 	typedef boost::mpl::vector<
-	    blackhole::sink::files_t<>,
+	    blackhole::sink::files_t<
+	        blackhole::sink::files::boost_backend_t,
+	        blackhole::sink::rotator_t<
+	            blackhole::sink::files::boost_backend_t,
+	            blackhole::sink::rotation::watcher::move_t
+	        >
+	    >,
 	    blackhole::sink::syslog_t<dnet_log_level>,
 	    blackhole::sink::socket_t<boost::asio::ip::tcp>,
 	    blackhole::sink::socket_t<boost::asio::ip::udp>
@@ -287,7 +293,12 @@ void parse_options(config_data *data, const config &options)
 	if (options.has("monitor")) {
 		const config monitor = options.at("monitor");
 		data->cfg_state.monitor_port = monitor.at("port", 0);
-		data->cfg_state.monitor_call_tree_timeout = monitor.at("call_tree_timeout", 0);
+	}
+
+	if (options.has("handystats_config")) {
+		data->cfg_state.handystats_config = strdup(options.at<std::string>("handystats_config").c_str());
+		if (!data->cfg_state.handystats_config)
+			throw std::bad_alloc();
 	}
 
 	if (options.has("cache")) {

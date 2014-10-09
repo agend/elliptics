@@ -48,8 +48,14 @@ class MonitorStatsChecker:
         Requests monitoring statistics of @self.categories and executes all categories checkers
         '''
         self.start_time = datetime.now()
-        self.json_stat = self.session.monitor_stat(self.address,
-                                                   categories=self.categories).get()[0].statistics
+        entry = self.session.monitor_stat(self.address, categories=self.categories).get()[0]
+        try:
+            self.json_stat = entry.statistics
+        except Exception as e:
+            with open("monitor.stat.json", "w") as f:
+                f.write(entry.__statistics__)
+            raise e
+
         self.end_time = datetime.now()
         self.__check_json_stat()
 
@@ -130,10 +136,6 @@ class MonitorStatsChecker:
         def check_queue(queue_json):
             '''checks queue statistics'''
             assert queue_json['current_size'] >= 0
-            assert queue_json['min'] >= 0
-            assert queue_json['max'] >= 0
-            assert queue_json['min'] <= queue_json['current_size'] <= queue_json['max']
-            assert queue_json['volume'] >= 0
         io = self.json_stat['io']
         check_queue(io['blocking'])
         check_queue(io['nonblocking'])

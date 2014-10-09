@@ -49,7 +49,6 @@ struct file_backend_root
 {
 	char			*root;
 	int			root_len;
-	int			rootfd;
 	int			sync;
 	int			bit_num;
 
@@ -70,7 +69,7 @@ static inline void file_backend_setup_file(struct file_backend_root *r, char *fi
 	char id_str[2*DNET_ID_SIZE+1];
 
 	file_backend_get_dir(id, r->bit_num, dir);
-	snprintf(file, size, "%s/%s", dir, dnet_dump_id_len_raw(id, DNET_ID_SIZE, id_str));
+	snprintf(file, size, "%s/%s/%s", r->root, dir, dnet_dump_id_len_raw(id, DNET_ID_SIZE, id_str));
 }
 
 static inline uint64_t file_backend_get_dir_bits(const unsigned char *id, int bit_num)
@@ -106,7 +105,7 @@ static void dnet_remove_file_if_empty_raw(char *file)
 
 static void dnet_remove_file_if_empty(struct file_backend_root *r, struct dnet_io_attr *io)
 {
-	char file[DNET_ID_SIZE * 2 + 8 + 8 + 2];
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
 
 	file_backend_setup_file(r, file, sizeof(file), io->id);
 	dnet_remove_file_if_empty_raw(file);
@@ -114,7 +113,7 @@ static void dnet_remove_file_if_empty(struct file_backend_root *r, struct dnet_i
 
 static void dnet_remove_file_local(struct file_backend_root *r, struct dnet_io_attr *io)
 {
-	char file[DNET_ID_SIZE * 2 + 8 + 8 + 2];
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
 
 	file_backend_setup_file(r, file, sizeof(file), io->id);
 	remove(file);
@@ -122,8 +121,8 @@ static void dnet_remove_file_local(struct file_backend_root *r, struct dnet_io_a
 
 static int file_write_raw(struct file_backend_root *r, struct dnet_io_attr *io)
 {
-	/* null byte + maximum directory length (32 bits in hex) + '/' directory prefix */
-	char file[DNET_ID_SIZE * 2 + 8 + 8 + 2];
+	/* root/dir/file + 0-byte */
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
 	int oflags = O_RDWR | O_CREAT | O_LARGEFILE | O_CLOEXEC;
 	void *data = io + 1;
 	int fd;
@@ -169,7 +168,8 @@ err_out_exit:
 static int file_write(struct file_backend_root *r, void *state __unused, struct dnet_cmd *cmd, void *data)
 {
 	int err, fd;
-	char dir[2*DNET_ID_SIZE+1];
+	char dir_only[2 * DNET_ID_SIZE + 1];
+	char dir[DNET_ID_SIZE * 4 + 4 + r->root_len];
 	struct dnet_io_attr *io = data;
 	struct eblob_key key;
 	struct dnet_ext_list elist;
@@ -186,6 +186,7 @@ static int file_write(struct file_backend_root *r, void *state __unused, struct 
 	data += sizeof(struct dnet_io_attr);
 
 	file_backend_get_dir(io->id, r->bit_num, dir);
+	snprintf(dir, sizeof(dir), "%s/%s", r->root, dir_only);
 
 	err = mkdir(dir, 0755);
 	if (err < 0) {
@@ -243,121 +244,40 @@ err_out_exit:
 	return err;
 }
 
-static int file_read(struct file_backend_root *r, void *state, struct dnet_cmd *cmd, void *data)
+static int file_io_attr(struct file_backend_root *r, const char *file, int fd, struct dnet_cmd *cmd, struct dnet_io_attr *io, uint8_t *id)
 {
-	struct dnet_io_attr *io = data;
-	int fd, err;
-	ssize_t size;
-	char file[DNET_ID_SIZE * 2 + 8 + 8 + 2];
-	struct stat st;
-
-	data += sizeof(struct dnet_io_attr);
-
-	dnet_convert_io_attr(io);
-
-	file_backend_setup_file(r, file, sizeof(file), io->id);
-
-	fd = open(file, O_RDONLY | O_CLOEXEC, 0644);
-	if (fd < 0) {
-		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: READ: %d: %s.",
-				dnet_dump_id(&cmd->id), file, err, strerror(-err));
-		goto err_out_exit;
-	}
-
-	size = io->size;
-
-	err = fstat(fd, &st);
-	if (err) {
-		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: read-stat: %d: %s.",
-				dnet_dump_id(&cmd->id), file, err, strerror(-err));
-		goto err_out_close_fd;
-	}
-
-	size = dnet_backend_check_get_size(io, st.st_size);
-	if (size <= 0) {
-		err = size;
-		goto err_out_close_fd;
-	}
-
-	io->total_size = st.st_size;
-	io->size = size;
-	err = dnet_send_read_data(state, cmd, io, NULL, fd, io->offset, 1);
-	if (err)
-		goto err_out_close_fd;
-	return 0;
-
-err_out_close_fd:
-	close(fd);
-err_out_exit:
-	return err;
-}
-
-static int file_del(struct file_backend_root *r, void *state __unused, struct dnet_cmd *cmd, void *data __unused)
-{
-	char file[DNET_ID_SIZE * 2 + 2*DNET_ID_SIZE + 2]; /* file + dir + suffix + slash + 0-byte */
-	char dir[2*DNET_ID_SIZE+1];
-	char id[2*DNET_ID_SIZE+1];
-	struct eblob_key key;
-
-	file_backend_get_dir(cmd->id.id, r->bit_num, dir);
-	memcpy(key.id, cmd->id.id, EBLOB_ID_SIZE);
-
-	snprintf(file, sizeof(file), "%s/%s",
-		dir, dnet_dump_id_len_raw(cmd->id.id, DNET_ID_SIZE, id));
-	remove(file);
-
-	eblob_remove(r->meta, &key);
-
-	return 0;
-}
-
-static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *cmd)
-{
-	char file[DNET_ID_SIZE * 2 + 2*DNET_ID_SIZE + 2]; /* file + dir + suffix + slash + 0-byte */
-	char dir[2*DNET_ID_SIZE+1];
-	char id[2*DNET_ID_SIZE+1];
-	int fd, err;
+	int err;
 	struct eblob_write_control wc;
 	struct eblob_key key;
 	struct dnet_ext_list elist;
 	struct stat st;
-	int64_t size;
+	uint64_t offset, size;
 	static const size_t ehdr_size = sizeof(struct dnet_ext_list_hdr);
 
-	memcpy(key.id, cmd->id.id, EBLOB_ID_SIZE);
-
 	dnet_ext_list_init(&elist);
-
-	file_backend_get_dir(cmd->id.id, r->bit_num, dir);
-
-	snprintf(file, sizeof(file), "%s/%s",
-		dir, dnet_dump_id_len_raw(cmd->id.id, DNET_ID_SIZE, id));
-
-	err = open(file, O_RDONLY | O_CLOEXEC);
-	if (err < 0) {
-		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-open: %d: %s.",
-			dnet_dump_id(&cmd->id), file, err, strerror(-err));
-		goto err_out_exit;
-	}
-	fd = err;
 
 	err = fstat(fd, &st);
 	if (err < 0) {
 		err = -errno;
 		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-stat: %d: %s.",
 			dnet_dump_id(&cmd->id), file, err, strerror(-err));
-		goto err_out_close;
+		goto err_out_exit;
 	}
+
+	offset = 0;
 	size = st.st_size;
 
+	err = dnet_backend_check_get_size(io, &offset, &size);
+	if (err) {
+		goto err_out_exit;
+	}
 
+	memcpy(key.id, id, EBLOB_ID_SIZE);
 	err = eblob_read_return(r->meta, &key, EBLOB_READ_NOCSUM, &wc);
 
 	if (!err && wc.total_data_size != ehdr_size) {
 		err = -ERANGE;
+		goto err_out_exit;
 	}
 
 	elist.timestamp.tsec = st.st_mtime;
@@ -379,7 +299,95 @@ static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *
 		}
 	}
 
-	err = dnet_send_file_info_ts(state, cmd, fd, 0, size, &elist.timestamp);
+	err = 0;
+
+	io->timestamp = elist.timestamp;
+	io->user_flags = elist.flags;
+
+err_out_exit:
+	dnet_ext_list_destroy(&elist);
+	return err;
+}
+
+static int file_read(struct file_backend_root *r, void *state, struct dnet_cmd *cmd, void *data)
+{
+	struct dnet_io_attr *io = data;
+	int fd, err;
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
+
+	data += sizeof(struct dnet_io_attr);
+
+	dnet_convert_io_attr(io);
+
+	file_backend_setup_file(r, file, sizeof(file), io->id);
+
+	fd = open(file, O_RDONLY | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		err = -errno;
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: READ: %d: %s.",
+				dnet_dump_id(&cmd->id), file, err, strerror(-err));
+		goto err_out_exit;
+	}
+
+	err = file_io_attr(r, file, fd, cmd, io, io->id);
+	if (err)
+		goto err_out_close;
+
+	err = dnet_send_read_data(state, cmd, io, NULL, fd, io->offset, 1);
+	if (err)
+		goto err_out_close;
+	return 0;
+
+err_out_close:
+	close(fd);
+err_out_exit:
+	return err;
+}
+
+static int file_del(struct file_backend_root *r, void *state __unused, struct dnet_cmd *cmd __unused, void *data)
+{
+	struct dnet_io_attr *io = data;
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
+	struct eblob_key key;
+
+	data += sizeof(struct dnet_io_attr);
+
+	dnet_convert_io_attr(io);
+
+	memcpy(key.id, io->id, EBLOB_ID_SIZE);
+
+	file_backend_setup_file(r, file, sizeof(file), io->id);
+
+	remove(file);
+
+	eblob_remove(r->meta, &key);
+
+	return 0;
+}
+
+static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *cmd)
+{
+	char file[DNET_ID_SIZE * 4 + 4 + r->root_len];
+	struct dnet_io_attr io;
+	int fd, err;
+
+	file_backend_setup_file(r, file, sizeof(file), cmd->id.id);
+
+	err = open(file, O_RDONLY | O_CLOEXEC);
+	if (err < 0) {
+		err = -errno;
+		dnet_backend_log(r->blog, DNET_LOG_ERROR, "%s: FILE: %s: info-stat-open: %d: %s.",
+			dnet_dump_id(&cmd->id), file, err, strerror(-err));
+		goto err_out_exit;
+	}
+	fd = err;
+
+	memset(&io, 0, sizeof(struct dnet_io_attr));
+	err = file_io_attr(r, file, fd, cmd, &io, cmd->id.id);
+	if (err)
+		goto err_out_close;
+
+	err = dnet_send_file_info_ts(state, cmd, fd, 0, io.size, &io.timestamp);
 	if (err)
 		goto err_out_close;
 	
@@ -388,7 +396,6 @@ static int file_info(struct file_backend_root *r, void *state, struct dnet_cmd *
 err_out_close:
 	close(fd);
 err_out_exit:
-	dnet_ext_list_destroy(&elist);
 	return err;
 }
 
@@ -494,30 +501,10 @@ static int dnet_file_set_root(struct dnet_config_backend *b, char *key __unused,
 		goto err_out_exit;
 	}
 
-	r->rootfd = open(r->root, O_RDONLY | O_CLOEXEC);
-	if (r->rootfd < 0) {
-		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to open root '%s': %s.", root, strerror(-err));
-		goto err_out_free;
-	}
 	r->root_len = strlen(r->root);
-
-	err = fchdir(r->rootfd);
-	if (err) {
-		err = -errno;
-		dnet_backend_log(r->blog, DNET_LOG_ERROR, "Failed to change current dir to root '%s' directory: %s.",
-				root, strerror(-err));
-		goto err_out_close;
-	}
 
 	return 0;
 
-err_out_close:
-	close(r->rootfd);
-	r->rootfd = -1;
-err_out_free:
-	free(r->root);
-	r->root = NULL;
 err_out_exit:
 	return err;
 }
@@ -562,7 +549,6 @@ static void file_backend_cleanup(void *priv)
 	struct file_backend_root *r = priv;
 
 	dnet_file_db_cleanup(r);
-	close(r->rootfd);
 	free(r->root);
 }
 
