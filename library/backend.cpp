@@ -573,6 +573,7 @@ void backend_fill_status_nolock(struct dnet_node *node, struct dnet_backend_stat
 	status->last_start = backend.last_start;
 	status->last_start_err = backend.last_start_err;
 	status->read_only = io.read_only;
+	status->delay = io.delay;
 }
 
 void backend_fill_status(dnet_node *node, dnet_backend_status *status, size_t backend_id)
@@ -605,6 +606,11 @@ static int dnet_cmd_backend_control_dangerous(struct dnet_net_state *st, struct 
 		control->backend_id, control->command, dnet_state_dump_addr(st));
 
 	const dnet_backend_info &backend = backends[control->backend_id];
+	if (backend.state == DNET_BACKEND_UNITIALIZED) {
+		dnet_log(node, DNET_LOG_ERROR, "backend_control: there is no such backend: %u, state: %s", control->backend_id, dnet_state_dump_addr(st));
+		return -EINVAL;
+	}
+
 	dnet_backend_io &io = node->io->backends[control->backend_id];
 
 	int state = DNET_BACKEND_DISABLED;
@@ -643,6 +649,10 @@ static int dnet_cmd_backend_control_dangerous(struct dnet_net_state *st, struct 
 			io.read_only = 0;
 			err = 0;
 		}
+		break;
+	case DNET_BACKEND_CTL:
+		io.delay = control->delay;
+		err = 0;
 		break;
 	}
 

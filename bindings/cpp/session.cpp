@@ -104,50 +104,36 @@ address::address()
 	memset(&m_addr, 0, sizeof(m_addr));
 }
 
-static void address_construct(dnet_addr *result, const char *addr, int port, int family)
-{
-	int err = dnet_create_addr(result, addr, port, family);
-	if (err) {
-		throw_error(err, "dnet_fill_addr failed, address: %s, port: %d, family: %d", addr, port, family);
-	}
-}
-
-static void address_construct(dnet_addr *result, const char *addr, size_t addr_len)
-{
-	// dnet_parse_addr will modify the string
-	std::vector<char> tmp;
-	tmp.reserve(addr_len + 1);
-	tmp.assign(addr, addr + addr_len);
-	tmp.push_back('\0');
-
-	int port;
-	int family;
-	int err = dnet_parse_addr(tmp.data(), &port, &family);
-	if (err) {
-		throw_error(err, "dnet_parse_addr failed, address: %s", addr);
-	}
-
-	address_construct(result, tmp.data(), port, family);
-}
-
 address::address(const std::string &host, int port, int family)
 {
-	address_construct(&m_addr, host.c_str(), port, family);
+	int err = dnet_create_addr(&m_addr, host.c_str(), port, family);
+	if (err) {
+		throw_error(err, "could not create addr: %s:%d:%d: %d", host.c_str(), port, family, err);
+	}
 }
 
 address::address(const char *host, int port, int family)
 {
-	address_construct(&m_addr, host, port, family);
+	int err = dnet_create_addr(&m_addr, host, port, family);
+	if (err) {
+		throw_error(err, "could not create addr: %s:%d:%d: %d", host, port, family, err);
+	}
 }
 
 address::address(const std::string &addr)
 {
-	address_construct(&m_addr, addr.c_str(), addr.size());
+	int err = dnet_create_addr_str(&m_addr, addr.c_str(), addr.size());
+	if (err) {
+		throw_error(err, "could not create addr: %s: %d", addr.c_str(), err);
+	}
 }
 
 address::address(const char *addr)
 {
-	address_construct(&m_addr, addr, strlen(addr));
+	int err = dnet_create_addr_str(&m_addr, addr, strlen(addr));
+	if (err) {
+		throw_error(err, "could not create addr: %s: %d", addr, err);
+	}
 }
 
 address::address(const dnet_addr &addr) : m_addr(addr)
@@ -1825,7 +1811,7 @@ void session::update_status(const address &addr, dnet_node_status *status)
 	}
 }
 
-static async_backend_control_result update_backend_status(session &orig_sess, const address &addr, uint32_t backend_id,
+static async_backend_control_result update_backend_status(session &orig_sess, const address &addr, uint32_t backend_id, uint32_t delay,
 	dnet_backend_command command, const std::vector<dnet_raw_id> &ids = std::vector<dnet_raw_id>())
 {
 	data_pointer data = data_pointer::allocate(sizeof(dnet_backend_control) + ids.size() * sizeof(dnet_raw_id));
@@ -1835,6 +1821,7 @@ static async_backend_control_result update_backend_status(session &orig_sess, co
 	backend_control->backend_id = backend_id;
 	backend_control->command = command;
 	backend_control->ids_count = ids.size();
+	backend_control->delay = delay;
 
 	if (!ids.empty()) {
 		data_pointer tmp = data.skip<dnet_backend_control>();
@@ -1863,32 +1850,37 @@ static async_backend_control_result update_backend_status(session &orig_sess, co
 
 async_backend_control_result session::enable_backend(const address &addr, uint32_t backend_id)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_ENABLE);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_ENABLE);
 }
 
 async_backend_control_result session::disable_backend(const address &addr, uint32_t backend_id)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_DISABLE);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_DISABLE);
 }
 
 async_backend_control_result session::start_defrag(const address &addr, uint32_t backend_id)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_START_DEFRAG);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_START_DEFRAG);
 }
 
 async_backend_control_result session::set_backend_ids(const address &addr, uint32_t backend_id, const std::vector<dnet_raw_id> &ids)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_SET_IDS, ids);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_SET_IDS, ids);
 }
 
 async_backend_control_result session::make_readonly(const address &addr, uint32_t backend_id)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_READ_ONLY);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_READ_ONLY);
 }
 
 async_backend_control_result session::make_writable(const address &addr, uint32_t backend_id)
 {
-	return update_backend_status(*this, addr, backend_id, DNET_BACKEND_WRITEABLE);
+	return update_backend_status(*this, addr, backend_id, 0, DNET_BACKEND_WRITEABLE);
+}
+
+async_backend_control_result session::set_delay(const address &addr, uint32_t backend_id, uint32_t delay)
+{
+	return update_backend_status(*this, addr, backend_id, delay, DNET_BACKEND_CTL);
 }
 
 async_backend_status_result session::request_backends_status(const address &addr)
