@@ -117,8 +117,8 @@ def merge_results(arg):
         is_sorted=True,
         tmp_dir=ctx.tmp_dir)
         for r in results]
-    filename = os.path.join(ctx.tmp_dir, 'merge_{0}'.format(range_id))
-    with open(filename, 'w') as f:
+
+    with open(ctx.merged_filename, 'a+b') as f:
         heap = []
 
         for d in results:
@@ -201,29 +201,6 @@ def unpickle(filename):
             break
 
 
-def final_merge(ctx, results):
-    ctx.stats.timer('main', 'final_merge')
-    log.info("final merge")
-
-    ctx.merged_filename = os.path.join(ctx.tmp_dir, 'merged_result')
-    dump_filename = os.path.join(ctx.tmp_dir, 'dump')
-
-    total_keys = 0
-    pickler = pickle.Pickler(open(ctx.merged_filename, 'wb'))
-    d_file = open(dump_filename, 'w')
-    for res in (r for r in results if r):
-        for key_data in unpickle(res):
-            pickler.dump(key_data)
-            d_file.write('{0}\n'.format(key_data[0]))
-            total_keys += 1
-        os.remove(res)
-    ctx.stats.counter('found_keys', total_keys)
-    log.info("Dumped %d keys in file: %s", total_keys, dump_filename)
-
-    log.debug("Merged_filename: %s, address: %s, groups: %s, tmp_dir: %s",
-              ctx.merged_filename, ctx.address, ctx.groups, ctx.tmp_dir)
-
-
 def main(ctx):
     ctx.stats.timer('main', 'started')
     ret = True
@@ -250,6 +227,8 @@ def main(ctx):
     log.info("Transposing iteration results")
     results = transpose_results(results)
     ctx.stats.timer('main', 'merge')
+    
+    ctx.merged_filename = os.path.join(ctx.tmp_dir, 'merged_result')
 
     try:
         log.info("Merging iteration results from different nodes")
@@ -258,8 +237,6 @@ def main(ctx):
         log.error("Caught Ctrl+C. Terminating.")
         ctx.stats.timer('main', 'finished')
         return False
-
-    final_merge(ctx, results)
 
     if ctx.dry_run:
         ctx.stats.timer('main', 'finished')
