@@ -3,8 +3,7 @@
 
 Summary:	Distributed hash table storage
 Name:		elliptics
-
-Version:	2.26.3.30
+Version:	2.26.3.33
 Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
@@ -144,6 +143,22 @@ rm -rf %{buildroot}
 
 
 %changelog
+* Mon Nov 10 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.33
+- lookup: extended lookup address to return dnet_addr, not address string
+- pytests: fixed broken index tests - use common cluster for all test and isolated cluster for test_special_cases
+
+* Fri Oct 24 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.32
+- tests: created config struct for create_nodes method and moved all argument to it
+- pytests: added test case for checking correct handling situation when 2 backends from different nodes has equal group and ids
+- pytests: made server node isolated - now server nodes do not know about each other
+- core: reset state if dnet_idc_update_backend has been failed.
+
+* Thu Oct 23 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.31
+- session: get rid of handmade address-to-string conversion, use dnet_addr_string() and friends helpers
+- addr: use getnameinfo() to properly determine family and automatically dereference sockaddr
+- addr: new thread-safe helpers to print address strings
+- Fixed remove_on_fail implementation
+
 * Tue Oct 21 2014 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.30
 - recovery: removed odd increasing of iterations
 - recovery: fixed memory leak at merge recovery
