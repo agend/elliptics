@@ -116,7 +116,7 @@ def main(options, args):
         fh = logging.FileHandler(ctx.log_file)
         fh.setFormatter(formatter)
         fh.setLevel(logging.INFO)
-		if options.debug:
+        if options.debug:
             fh.setLevel(logging.DEBUG)
         log.addHandler(fh)
     except Exception as e:
