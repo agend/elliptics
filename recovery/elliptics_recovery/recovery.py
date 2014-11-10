@@ -115,7 +115,9 @@ def main(options, args):
         # elliptics library and python app, esp. in presence of auto-rotation
         fh = logging.FileHandler(ctx.log_file)
         fh.setFormatter(formatter)
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(logging.INFO)
+		if options.debug:
+            fh.setLevel(logging.DEBUG)
         log.addHandler(fh)
     except Exception as e:
         raise ValueError("Can't parse log_level: '{0}': {1}, traceback: {2}"
