@@ -3,7 +3,7 @@
 
 Summary:	Distributed hash table storage
 Name:		elliptics
-Version:	2.26.3.35
+Version:	2.26.3.36
 Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
@@ -15,7 +15,7 @@ BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	python-devel
 BuildRequires:	libcocaine-core2-devel >= 0.11.2.0
 BuildRequires:  cocaine-framework-native-devel >= 0.11.0.0
-BuildRequires:	eblob-devel >= 0.22.9
+BuildRequires:	eblob-devel >= 0.22.15
 BuildRequires:  libblackhole-devel >= 0.2.3-1
 BuildRequires:	libev-devel libtool-ltdl-devel
 BuildRequires:	cmake msgpack-devel python-msgpack
@@ -143,6 +143,12 @@ rm -rf %{buildroot}
 
 
 %changelog
+* Wed Jan 28 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.36
+- package: depend on 0.22.15+ eblob
+- logs: fixed printing trace_id at logs while receiving/sending packets
+- iterator: made iterators with `no-meta` flag to return zero timestamp.
+- 	Now if iterator faces a record with corrupted exteded header it will return a key with empty extended header.
+
 * Sat Jan 17 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.3.35
 - logger: let file logger to watch to its sink file and allow file to be moved/rotated
 - Indent cleanup
