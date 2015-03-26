@@ -42,6 +42,9 @@ class Servers:
         config['monitor'] = True
         config['path'] = self.path
         config['isolated'] = isolated
+        config['top_period'] = 5 * 60
+        config['top_length'] = 50
+        config['top_events_size'] = 1000 * 100
         servers = []
         for node in xrange(nodes_count):
             backends = []
@@ -69,6 +72,7 @@ class Servers:
 
         assert self.p.poll() is None
 
+        self.config_params = config
         self.remotes = [str(x['remote']) for x in self.config['servers']]
         self.monitors = [str(x['monitor']) for x in self.config['servers']]
 

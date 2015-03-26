@@ -134,7 +134,6 @@ static int blob_iterate_callback_common(struct eblob_disk_control *dc, void *dat
 	err = ictl->callback(ictl->callback_private, (struct dnet_raw_id *)&key_elliptics_transform,
 			data, size, &elist);
 
-err:
 	dnet_ext_list_destroy(&elist);
 	return err;
 }
