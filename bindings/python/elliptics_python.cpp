@@ -39,46 +39,54 @@ namespace bp = boost::python;
 
 namespace ioremap { namespace elliptics { namespace python {
 enum elliptics_iterator_types {
-	itype_disk = DNET_ITYPE_DISK,
-	itype_network = DNET_ITYPE_NETWORK,
+	itype_disk	= DNET_ITYPE_DISK,
+	itype_network	= DNET_ITYPE_NETWORK,
 };
 
 enum elliptics_iterator_flags {
-	iflag_default = 0,
-	iflag_data = DNET_IFLAGS_DATA,
-	iflag_key_range = DNET_IFLAGS_KEY_RANGE,
-	iflag_ts_range = DNET_IFLAGS_TS_RANGE,
-	iflag_no_meta = DNET_IFLAGS_NO_META,
+	iflag_default	= 0,
+	iflag_data	= DNET_IFLAGS_DATA,
+	iflag_key_range	= DNET_IFLAGS_KEY_RANGE,
+	iflag_ts_range	= DNET_IFLAGS_TS_RANGE,
+	iflag_no_meta	= DNET_IFLAGS_NO_META,
 };
 
 enum elliptics_cflags {
-	cflags_default = 0,
-	cflags_direct = DNET_FLAGS_DIRECT,
-	cflags_nolock = DNET_FLAGS_NOLOCK,
+	cflags_default	= 0,
+	cflags_direct	= DNET_FLAGS_DIRECT,
+	cflags_nolock	= DNET_FLAGS_NOLOCK,
 };
 
 enum elliptics_ioflags {
-	ioflags_default = 0,
-	ioflags_append = DNET_IO_FLAGS_APPEND,
-	ioflags_prepare = DNET_IO_FLAGS_PREPARE,
-	ioflags_commit = DNET_IO_FLAGS_COMMIT,
-	ioflags_overwrite = DNET_IO_FLAGS_OVERWRITE,
-	ioflags_nocsum = DNET_IO_FLAGS_NOCSUM,
-	ioflags_plain_write = DNET_IO_FLAGS_PLAIN_WRITE,
-	ioflags_cache = DNET_IO_FLAGS_CACHE,
-	ioflags_cache_only = DNET_IO_FLAGS_CACHE_ONLY,
-	ioflags_cache_remove_from_disk = DNET_IO_FLAGS_CACHE_REMOVE_FROM_DISK,
+	ioflags_default			= 0,
+	ioflags_append			= DNET_IO_FLAGS_APPEND,
+	ioflags_prepare			= DNET_IO_FLAGS_PREPARE,
+	ioflags_commit			= DNET_IO_FLAGS_COMMIT,
+	ioflags_overwrite		= DNET_IO_FLAGS_OVERWRITE,
+	ioflags_nocsum			= DNET_IO_FLAGS_NOCSUM,
+	ioflags_plain_write		= DNET_IO_FLAGS_PLAIN_WRITE,
+	ioflags_cache			= DNET_IO_FLAGS_CACHE,
+	ioflags_cache_only		= DNET_IO_FLAGS_CACHE_ONLY,
+	ioflags_cache_remove_from_disk	= DNET_IO_FLAGS_CACHE_REMOVE_FROM_DISK,
+};
+
+enum elliptics_record_flags {
+	record_flags_remove		= DNET_RECORD_FLAGS_REMOVE,
+	record_flags_nocsum		= DNET_RECORD_FLAGS_NOCSUM,
+	record_flags_append		= DNET_RECORD_FLAGS_APPEND,
+	record_flags_exthdr		= DNET_RECORD_FLAGS_EXTHDR,
+	record_flags_uncommitted	= DNET_RECORD_FLAGS_UNCOMMITTED,
 };
 
 enum elliptics_exceptions_policy {
 	policy_no_exceptions			= ioremap::elliptics::session::no_exceptions,
 	policy_throw_at_start			= ioremap::elliptics::session::throw_at_start,
 	policy_throw_at_wait			= ioremap::elliptics::session::throw_at_wait,
-	policy_throw_at_get				= ioremap::elliptics::session::throw_at_get,
-	policy_throw_at_iterator_end	= ioremap::elliptics::session::throw_at_iterator_end,
+	policy_throw_at_get			= ioremap::elliptics::session::throw_at_get,
+	policy_throw_at_iterator_end		= ioremap::elliptics::session::throw_at_iterator_end,
 	policy_default_exceptions		= ioremap::elliptics::session::throw_at_wait |
-									  ioremap::elliptics::session::throw_at_get |
-									  ioremap::elliptics::session::throw_at_iterator_end
+						  ioremap::elliptics::session::throw_at_get |
+						  ioremap::elliptics::session::throw_at_iterator_end
 };
 
 enum elliptics_config_flags {
@@ -86,7 +94,7 @@ enum elliptics_config_flags {
 	config_flags_no_route_list		= DNET_CFG_NO_ROUTE_LIST,
 	config_flags_mix_states			= DNET_CFG_MIX_STATES,
 	config_flags_no_csum			= DNET_CFG_NO_CSUM,
-	config_flags_randomize_states	= DNET_CFG_RANDOMIZE_STATES,
+	config_flags_randomize_states		= DNET_CFG_RANDOMIZE_STATES,
 };
 
 enum elliptics_node_status_flags {
@@ -422,6 +430,20 @@ BOOST_PYTHON_MODULE(core)
 		.value("cache", ioflags_cache)
 		.value("cache_only", ioflags_cache_only)
 		.value("cache_remove_from_disk", ioflags_cache_remove_from_disk)
+	;
+
+	bp::enum_<elliptics_record_flags>("record_flags",
+		"Bit flags which specifies state of the record at the backend\n\n"
+		"remove\n    The record is removed\n"
+		"nocsum\n    The record is written without csum\n"
+		"append\n    The record is written via append\n"
+		"exthdr\n    The record is written with extended header"
+		"uncommitted\n    The record is uncommitted so it can't be read but can be writted and committed")
+		.value("remove", record_flags_remove)
+		.value("nocsum", record_flags_nocsum)
+		.value("append", record_flags_append)
+		.value("exthdr", record_flags_exthdr)
+		.value("uncommitted", record_flags_uncommitted)
 	;
 
 	bp::enum_<blackhole::defaults::severity>("log_level",

@@ -48,6 +48,13 @@ int dnet_transform_node(struct dnet_node *n, const void *src, uint64_t size, uns
 	return t->transform(t->priv, NULL, src, size, csum, (unsigned int *)&csize, 0);
 }
 
+int dnet_transform_file(struct dnet_node *n, int fd, uint64_t offset, uint64_t size, char *csum, unsigned int csize)
+{
+	struct dnet_transform *t = &n->transform;
+
+	return t->transform_file(t->priv, NULL, fd, offset, size, csum, (unsigned int *)&csize, 0);
+}
+
 int dnet_transform_raw(struct dnet_session *s, const void *src, uint64_t size, char *csum, unsigned int csize)
 {
 	struct dnet_node *n = s->node;
@@ -186,10 +193,14 @@ const char *dnet_backend_state_string(uint32_t state)
 const char *dnet_backend_defrag_state_string(uint32_t state)
 {
 	switch ((enum dnet_backend_defrag_state)state) {
-		case DNET_BACKEND_DEFRAG_IN_PROGRESS:
-			return "in-progress";
 		case DNET_BACKEND_DEFRAG_NOT_STARTED:
 			return "not-started";
+		case DNET_BACKEND_DEFRAG_IN_PROGRESS:
+			return "defrag in-progress";
+		case DNET_BACKEND_INDEX_SORT_IN_PROGRESS:
+			return "indexsort in-progress";
+		case DNET_BACKEND_COMPACT_IN_PROGRESS:
+			return "compact in-progress";
 		default:
 			return "unknown";
 	}
@@ -342,6 +353,7 @@ void dnet_io_trans_alloc_send(struct dnet_session *s, struct dnet_io_control *ct
 	struct dnet_addr *request_addr = NULL;
 	uint64_t size = ctl->io.size;
 	uint64_t tsize = sizeof(struct dnet_io_attr) + sizeof(struct dnet_cmd);
+	double backend_weight = 0.;
 	int err;
 
 	if (ctl->cmd == DNET_CMD_READ)
@@ -385,18 +397,20 @@ void dnet_io_trans_alloc_send(struct dnet_session *s, struct dnet_io_control *ct
 	}
 
 	cmd->trans = t->rcv_trans = t->trans = atomic_inc(&n->trans);
+	dnet_get_backend_weight(t->st, cmd->backend_id, &backend_weight);
 	request_addr = dnet_state_addr(t->st);
 
 	dnet_log(n, DNET_LOG_INFO, "%s: created trans: %llu, cmd: %s, cflags: %s, size: %llu, offset: %llu, "
-			"fd: %d, local_offset: %llu -> %s weight: %f, wait-ts: %ld.",
+			"fd: %d, local_offset: %llu -> %s/%d weight: %f, wait-ts: %ld, ioflags: %s",
 			dnet_dump_id(&ctl->id),
 			(unsigned long long)t->trans,
 			dnet_cmd_string(ctl->cmd), dnet_flags_dump_cflags(cmd->flags),
 			(unsigned long long)ctl->io.size, (unsigned long long)ctl->io.offset,
 			ctl->fd,
 			(unsigned long long)ctl->local_offset,
-			dnet_addr_string(&t->st->addr), t->st->weight,
-			t->wait_ts.tv_sec);
+		        dnet_addr_string(&t->st->addr), cmd->backend_id, backend_weight,
+			t->wait_ts.tv_sec,
+			dnet_flags_dump_ioflags(ctl->io.flags));
 
 	dnet_convert_cmd(cmd);
 	dnet_convert_io_attr(io);
@@ -454,13 +468,11 @@ struct dnet_wait *dnet_wait_alloc(int cond)
 	int err;
 	struct dnet_wait *w;
 
-	w = malloc(sizeof(struct dnet_wait));
+	w = calloc(1, sizeof(struct dnet_wait));
 	if (!w) {
 		err = -ENOMEM;
 		goto err_out_exit;
 	}
-
-	memset(w, 0, sizeof(struct dnet_wait));
 
 	err = pthread_cond_init(&w->wait, NULL);
 	if (err)
@@ -502,6 +514,7 @@ int dnet_send_cmd(struct dnet_session *s,
 	struct dnet_net_state *st;
 	struct dnet_idc *idc;
 	int num = 0, i, found_group;
+	struct rb_node *it;
 	struct dnet_group *g;
 	struct dnet_trans_control ctl;
 
@@ -558,12 +571,16 @@ int dnet_send_cmd(struct dnet_session *s,
 		}
 		pthread_mutex_unlock(&n->state_lock);
 	} else {
+		// TODO: refactor code below
 		pthread_mutex_lock(&n->state_lock);
 		list_for_each_entry(st, &n->dht_state_list, node_entry) {
 			if (st == n->st)
 				continue;
 
-			list_for_each_entry(idc, &st->idc_list, state_entry) {
+			pthread_rwlock_rdlock(&st->idc_lock);
+			for (it = rb_first(&st->idc_root); it; it = rb_next(it)) {
+				idc = rb_entry(it, struct dnet_idc, state_entry);
+
 				g = idc->group;
 
 				found_group = 0;
@@ -581,6 +598,7 @@ int dnet_send_cmd(struct dnet_session *s,
 
 				break;
 			}
+			pthread_rwlock_unlock(&st->idc_lock);
 		}
 		pthread_mutex_unlock(&n->state_lock);
 	}
@@ -653,143 +671,6 @@ int dnet_request_cmd(struct dnet_session *s, struct dnet_trans_control *ctl)
 	dnet_log(n, DNET_LOG_NOTICE, "request cmd: %s: %ld usecs, num: %d.", dnet_cmd_string(ctl->cmd), diff, num);
 
 	return num;
-}
-
-struct dnet_update_status_priv {
-	struct dnet_wait *w;
-	struct dnet_node_status status;
-	atomic_t refcnt;
-};
-
-int dnet_request_cmd_addr(struct dnet_session *s, struct dnet_addr *addr, struct dnet_trans_control *ctl)
-{
-	struct dnet_net_state *st;
-	int err;
-
-	st = dnet_state_search_by_addr(s->node, addr);
-	if (!st) {
-		dnet_log(s->node, DNET_LOG_ERROR, "%s: %s: request_cmd_addr: could not find network state for address",
-			dnet_dump_id(&ctl->id), dnet_addr_string(addr));
-		return -ENXIO;
-	}
-
-	err = dnet_request_cmd_single(s, st, ctl);
-
-	dnet_state_put(st);
-
-	if (err)
-		return err;
-	else
-		return 1;
-}
-
-static int dnet_update_status_complete(struct dnet_addr *addr __unused, struct dnet_cmd *cmd, void *priv)
-{
-	struct dnet_update_status_priv *p = priv;
-
-	if (is_trans_destroyed(cmd)) {
-		int err = -ENOENT;
-		if (cmd)
-			err = cmd->status;
-
-		dnet_wakeup(p->w, p->w->cond++);
-		dnet_wait_put(p->w);
-		if (atomic_dec_and_test(&p->refcnt)) {
-			free(p);
-		}
-
-		return err;
-	}
-
-	if (cmd->size == sizeof(struct dnet_node_status)) {
-		memcpy(&p->status, cmd + 1, sizeof(struct dnet_node_status));
-		return 0;
-	}
-
-	return -ENOENT;
-}
-
-int dnet_update_status(struct dnet_session *s, const struct dnet_addr *addr, struct dnet_id *id, struct dnet_node_status *status)
-{
-	int err;
-	struct dnet_update_status_priv *priv;
-	struct dnet_trans_control ctl;
-
-	if (!id && !addr) {
-		err = -EINVAL;
-		goto err_out_exit;
-	}
-
-	memset(&ctl, 0, sizeof(ctl));
-
-	if (id) {
-		memcpy(&ctl.id, id, sizeof(struct dnet_id));
-	} else {
-		struct dnet_net_state *st;
-		struct dnet_idc *idc;
-
-		st = dnet_state_search_by_addr(s->node, addr);
-		if (!st) {
-			err = -ENXIO;
-			dnet_log(s->node, DNET_LOG_ERROR, "%s: %s: update_state: could not find network state for address",
-				dnet_dump_id(&ctl.id), dnet_addr_string(addr));
-		}
-
-		pthread_mutex_lock(&st->n->state_lock);
-
-		if (list_empty(&st->idc_list)) {
-			pthread_mutex_unlock(&st->n->state_lock);
-
-			err = -ENXIO;
-			goto err_out_exit;
-		}
-
-		idc = list_first_entry(&st->idc_list, struct dnet_idc, state_entry);
-		dnet_setup_id(&ctl.id, idc->group->group_id, idc->ids[0].raw.id);
-
-		pthread_mutex_unlock(&st->n->state_lock);
-
-		dnet_state_put(st);
-	}
-
-	priv = malloc(sizeof(struct dnet_update_status_priv));
-	if (!priv) {
-		err = -ENOMEM;
-		goto err_out_exit;
-	}
-
-	atomic_init(&priv->refcnt, 1);
-
-	priv->w = dnet_wait_alloc(0);
-	if (!priv->w) {
-		err = -ENOMEM;
-		goto err_out_free;
-	}
-
-	ctl.complete = dnet_update_status_complete;
-	ctl.priv = priv;
-	ctl.cmd = DNET_CMD_STATUS;
-	ctl.cflags = DNET_FLAGS_NEED_ACK;
-	ctl.size = sizeof(struct dnet_node_status);
-	ctl.data = status;
-
-	dnet_wait_get(priv->w);
-	atomic_inc(&priv->refcnt);
-
-	dnet_request_cmd_single(s, NULL, &ctl);
-
-	err = dnet_wait_event(priv->w, priv->w->cond == 1, dnet_session_get_timeout(s));
-	dnet_wait_put(priv->w);
-	if (!err && priv) {
-		memcpy(status, &priv->status, sizeof(struct dnet_node_status));
-	}
-
-err_out_free:
-	if (atomic_dec_and_test(&priv->refcnt))
-		free(priv);
-
-err_out_exit:
-	return err;
 }
 
 struct dnet_node *dnet_get_node_from_state(void *state)
@@ -896,7 +777,7 @@ int dnet_mix_states(struct dnet_session *s, struct dnet_id *id, int **groupsp)
 	struct dnet_node *n = s->node;
 	struct dnet_weight *weights;
 	int *groups;
-	int group_num, i, num;
+	int group_num, i, num, backend_id;
 	struct dnet_net_state *st;
 
 	if (!s->group_num)
@@ -931,14 +812,15 @@ int dnet_mix_states(struct dnet_session *s, struct dnet_id *id, int **groupsp)
 		for (i = 0, num = 0; i < group_num; ++i) {
 			id->group_id = groups[i];
 
-			st = dnet_state_get_first(n, id);
+			st = dnet_state_get_first_with_backend(n, id, &backend_id);
 			if (st) {
-				weights[num].weight = st->weight;
-				weights[num].group_id = id->group_id;
+				const int err = dnet_get_backend_weight(st, backend_id, &weights[num].weight);
+				if (!err) {
+					weights[num].group_id = id->group_id;
+					num++;
+				}
 
 				dnet_state_put(st);
-
-				num++;
 			}
 		}
 	}
@@ -1011,6 +893,7 @@ int dnet_get_routes(struct dnet_session *s, struct dnet_route_entry **entries) {
 	struct dnet_idc *idc;
 	struct dnet_route_entry *tmp_entries;
 	struct dnet_route_entry *entry;
+	struct rb_node *it;
 	int size = 0, count = 0, err = 0;
 	int i;
 
@@ -1018,7 +901,9 @@ int dnet_get_routes(struct dnet_session *s, struct dnet_route_entry **entries) {
 
 	pthread_mutex_lock(&n->state_lock);
 	list_for_each_entry(st, &n->dht_state_list, node_entry) {
-		list_for_each_entry(idc, &st->idc_list, state_entry) {
+		pthread_rwlock_rdlock(&st->idc_lock);
+		for (it = rb_first(&st->idc_root); it; it = rb_next(it)) {
+			idc = rb_entry(it, struct dnet_idc, state_entry);
 
 			size += idc->id_num;
 
@@ -1041,6 +926,7 @@ int dnet_get_routes(struct dnet_session *s, struct dnet_route_entry **entries) {
 				dnet_state_dump_addr(st), dnet_dump_id_str(idc->ids[0].raw.id),
 				idc->group->group_id, idc->backend_id, idc);
 		}
+		pthread_rwlock_unlock(&st->idc_lock);
 	}
 	pthread_mutex_unlock(&n->state_lock);
 

@@ -18,12 +18,14 @@ import logging
 import threading
 import os
 import traceback
+import errno
 
 from elliptics_recovery.utils.misc import elliptics_create_node, RecoverStat, validate_index, INDEX_MAGIC_NUMBER_LENGTH
 from elliptics_recovery.utils.misc import load_key_data
 
 import elliptics
 from elliptics import Address
+from elliptics.log import formatter
 
 log = logging.getLogger()
 
@@ -42,6 +44,8 @@ class KeyRecover(object):
         self.read_session.set_filter(elliptics.filters.all)
         self.write_session = elliptics.Session(node)
         self.write_session.set_checker(elliptics.checkers.all)
+        self.remove_session = elliptics.Session(node)
+        self.remove_session.set_checker(elliptics.checkers.all)
         self.result = False
         self.attempt = 0
 
@@ -53,17 +57,55 @@ class KeyRecover(object):
         self.total_size = self.key_infos[0].size
         self.chunked = self.total_size > self.ctx.chunk_size
         self.recovered_size = 0
-        self.same_groups = [k.group_id for k in self.key_infos if (k.timestamp, k.size) == (self.key_infos[0].timestamp, self.key_infos[0].size)]
-        self.key_infos = [k for k in self.key_infos if k.group_id not in self.same_groups]
-        self.diff_groups += [k.group_id for k in self.key_infos]
+
+        same_ts = lambda lhs, rhs: lhs.timestamp == rhs.timestamp
+        same_infos = [info for info in self.key_infos if same_ts(info, self.key_infos[0])]
+
+        same_uncommitted = [info for info in same_infos if info.flags & elliptics.record_flags.uncommitted]
+        if same_uncommitted == same_infos:
+            # if all such keys have exceeded prepare timeout - remove all replicas
+            # else skip recovering because the key is under writting and can be committed in nearest future.
+            same_groups = [info.group_id for info in same_infos]
+            if same_infos[0].timestamp < self.ctx.prepare_timeout:
+                self.remove_session.groups = [info.group_id for info in self.key_infos]
+                log.info('Key: {0} replicas with newest timestamp: {1} from groups: {2} are uncommitted. '
+                         'Prepare timeout: {3} was exceeded. Remove all replicas from groups: {4}'
+                         .format(self.key, same_infos[0].timestamp, same_groups, self.ctx.prepare_timeout,
+                                 self.remove_session.groups))
+                self.remove()
+            else:
+                log.info('Key: {0} replicas with newest timestamp: {1} from groups: {2} are uncommitted. '
+                         'Prepare timeout: {3} was not exceeded. The key is written now. Skip it.'
+                         .format(self.key, same_infos[0].timestamp, same_groups, self.ctx.prepare_timeout))
+                self.stats.skipped += 1
+                self.stop(True)
+            return
+        elif same_uncommitted != []:
+            # removed incomplete replicas meta from same_infos
+            # they will be corresponding as different and will be overwritten
+            same_infos = [info for info in same_infos if info not in same_uncommitted]
+            incomplete_groups = [info.group_id for info in same_uncommitted]
+            same_groups = [info.group_id for info in same_infos]
+            log.info('Key: {0} has uncommitted replicas in groups: {1} and completed replicas in groups: {2}.'
+                     'The key will be recovered at groups with uncommitted replicas too.'
+                     .format(self.key, incomplete_groups, same_groups))
+
+        same_meta = lambda lhs, rhs: (lhs.timestamp, lhs.size) == (rhs.timestamp, rhs.size)
+        same_infos = [info for info in self.key_infos if same_meta(info, same_infos[0])]
+
+        self.same_groups = [info.group_id for info in same_infos]
+        self.key_infos = [info for info in self.key_infos if info.group_id not in self.same_groups]
+        self.diff_groups += [info.group_id for info in self.key_infos]
         self.diff_groups = list(set(self.diff_groups).difference(self.same_groups))
+
         if not self.diff_groups and not self.missed_groups:
             log.debug("Key: {0} already up-to-date in all groups: {1}".format(self.key, self.same_groups))
             self.stop(False)
             return
 
         log.debug("Try to recover key: {0} from groups: {1} to groups: {2}: diff groups: {3}, missed groups: {4}"
-                  .format(self.key, self.same_groups, self.diff_groups + self.missed_groups, self.diff_groups, self.missed_groups))
+                  .format(self.key, self.same_groups, self.diff_groups + self.missed_groups,
+                          self.diff_groups, self.missed_groups))
 
         self.read_session.groups = self.same_groups
         self.write_session.groups = self.diff_groups + self.missed_groups
@@ -75,25 +117,24 @@ class KeyRecover(object):
         self.complete.set()
 
     def read(self):
-        size = 0
         try:
+            size = self.total_size
             log.debug("Reading key: {0} from groups: {1}, chunked: {2}"
                       .format(self.key, self.read_session.groups, self.chunked))
             if self.chunked:
                 size = min(self.total_size - self.recovered_size, self.ctx.chunk_size)
-            if self.recovered_size != 0:
-                self.read_session.ioflags != elliptics.io_flags.nocsum
-            else:
-                #first read should be at least INDEX_MAGIC_NUMBER_LENGTH bytes
-                size = min(self.total_size, max(size, INDEX_MAGIC_NUMBER_LENGTH))
-            log.debug("Reading key: {0} from groups: {1}, chunked: {2}, offset: {3}, size: {4}, total_size: {5}"
-                      .format(self.key, self.read_session.groups, self.chunked, self.recovered_size, size, self.total_size))
-
             # do not check checksum for all but the first chunk
             if self.recovered_size != 0:
-                self.read_session.ioflags = elliptics.io_flags.nocsum
+                self.read_session.ioflags |= elliptics.io_flags.nocsum
             else:
+                # first read should be at least INDEX_MAGIC_NUMBER_LENGTH bytes
+                size = min(self.total_size, max(size, INDEX_MAGIC_NUMBER_LENGTH))
                 self.read_session.ioflags = 0
+
+            log.debug("Reading key: {0} from groups: {1}, chunked: {2}, offset: {3}, size: {4}, total_size: {5}"
+                      .format(self.key, self.read_session.groups, self.chunked,
+                              self.recovered_size, size, self.total_size))
+
             read_result = self.read_session.read_data(self.key,
                                                       offset=self.recovered_size,
                                                       size=size)
@@ -143,31 +184,65 @@ class KeyRecover(object):
                       .format(self.key, repr(e), traceback.format_exc()))
             self.stop(False)
 
+    def remove(self):
+        if self.ctx.safe or self.ctx.dry_run:
+            if self.ctx.safe:
+                log.info("Safe mode is turned on. Skip removing key: {0}".format(repr(self.key)))
+            else:
+                log.info("Dry-run mode is turned on. Skip removing key: {0}.".format(repr(self.key)))
+            self.stop(True)
+        else:
+            try:
+                log.info("Removing key: {0} from group: {1}".format(self.key, self.remove_session.groups))
+                remove_result = self.remove_session.remove(self.key)
+                remove_result.connect(self.onremove)
+            except:
+                log.exception("Failed to remove key: {0} from groups: {1}".format(self.key, self.remove_session.groups))
+                self.stop(False)
+
     def onread(self, results, error):
         try:
             if error.code:
                 log.error("Failed to read key: {0} from groups: {1}: {2}".format(self.key, self.same_groups, error))
-                self.stats.read_failed += 1
-                if error.code == 110 and self.attempt < self.ctx.attempts:
-                    self.attempt += len(self.read_session.groups)
-                    log.debug("Read has been timed out. Try to reread key: {0} from groups: {1}, attempt: {2}/{3}"
-                              .format(self.key, self.same_groups, self.attempt, self.ctx.attempts))
-                    self.read()
+                self.stats.read_failed += len(results)
+                if error.code == errno.ETIMEDOUT:
+                    if self.attempt < self.ctx.attempts:
+                        self.attempt += 1
+                        old_timeout = self.read_session.timeout
+                        self.read_session.timeout *= 2
+                        log.error("Read has been timed out. Try to reread key: {0} from groups: {1}, attempt: {2}/{3} "
+                                  "with increased timeout: {4}/{5}"
+                                  .format(self.key, self.same_groups, self.attempt, self.ctx.attempts,
+                                          self.read_session.timeout, old_timeout))
+                        self.read()
+                    else:
+                        log.error("Read has been timed out {0} times, all {1} attemps are used. "
+                                  "The key: {1} can't be recovery now. Skip it"
+                                  .format(self.attempt, self.key))
+                        self.stats.skipped += 1
+                        self.stop(False)
                 elif len(self.key_infos) > 1:
-                    self.stats.read_failed += len(self.read_session.groups)
+                    log.error("Key: {0} has available replicas in other groups. Try to recover the key from them"
+                              .format(self.key))
                     self.diff_groups += self.read_session.groups
                     self.run()
                 else:
-                    log.error("Failed to read key: {0} from any available group. This key couldn't be recovered now.".format(self.key))
+                    log.error("Failed to read key: {0} from any available group. "
+                              "This key can't be recovered now. Skip it"
+                              .format(self.key))
+                    self.stats.skipped += 1
                     self.stop(False)
                 return
 
+            self.stats.read_failed += len(results) - 1
             self.stats.read += 1
             self.stats.read_bytes += results[-1].size
 
             if self.recovered_size == 0:
                 self.write_session.user_flags = results[-1].user_flags
                 self.write_session.timestamp = results[-1].timestamp
+                self.read_session.ioflags |= elliptics.io_flags.nocsum
+                self.read_session.groups = [results[-1].group_id]
                 if self.total_size != results[-1].total_size:
                     self.total_size = results[-1].total_size
                     self.chunked = self.total_size > self.ctx.chunk_size
@@ -200,37 +275,63 @@ class KeyRecover(object):
                     old_timeout = self.write_session.timeout
                     self.write_session.timeout *= 2
                     self.attempt += 1
-                    log.debug("Retry to write key: {0} attempts: {1}/{2} "
-                              "increased timeout: {3}/{4}"
-                              .format(repr(self.key),
-                                      self.attempt, self.ctx.attempts,
-                                      self.write_session.timeout,
-                                      old_timeout))
-                    self.stats.write_failed += 1
+                    log.info("Retry to write key: {0} attempts: {1}/{2} increased timeout: {3}/{4}"
+                             .format(repr(self.key), self.attempt, self.ctx.attempts,
+                                     self.write_session.timeout, old_timeout))
+                    self.stats.write_retries += 1
                     self.write()
                     return
-                self.stats.write_failed += 1
                 self.stop(False)
                 return
 
             self.stats.write += len(results)
-            self.stats.written_bytes += sum([r.size for r in results])
             if self.index_shard:
+                self.stats.written_bytes += sum([r.size for r in results])
                 log.debug("Recovered index shard at key: {0}".format(repr(self.key)))
                 self.stop(True)
                 return
 
             self.recovered_size += len(self.write_data)
+            self.stats.written_bytes += len(self.write_data) * len(results)
             self.attempt = 0
             if self.recovered_size < self.total_size:
                 self.read()
             else:
-                log.debug("Key: {0} has been successfully copied to groups: {1}".format(repr(self.key), [r.group_id for r in results]))
+                log.debug("Key: {0} has been successfully copied to groups: {1}"
+                          .format(repr(self.key), [r.group_id for r in results]))
                 self.stop(True)
         except Exception as e:
             log.error("Failed to handle write result key: {0}: {1}, traceback: {2}"
                       .format(self.key, repr(e), traceback.format_exc()))
             self.stop(False)
+
+    def onremove(self, results, error):
+        try:
+            if error.code:
+                self.stats.remove_failed += 1
+                log.error("Failed to remove key: {0}: from groups: {1}: {2}"
+                          .format(self.key, self.remove_session.groups, error))
+                if self.attempt < self.ctx.attempts:
+                    old_timeout = self.remove_session.timeout
+                    self.remove_session.timeout *= 2
+                    self.attempt += 1
+                    log.info("Retry to remove key: {0} attempts: {1}/{2} "
+                             "increased timeout: {3}/{4}"
+                             .format(repr(self.key),
+                                     self.attempt, self.ctx.attempts,
+                                     self.remove_session.timeout,
+                                     old_timeout))
+                    self.stats.remove_retries += 1
+                    self.remove()
+                    return
+                self.stop(False)
+                return
+
+            self.stats.remove += len(results)
+            self.stop(True)
+        except:
+            log.exception("Failed to handle remove result key: {0} from groups: {1}"
+                          .format(self.key, self.remove_session.groups))
 
     def wait(self):
         if not self.complete.is_set():
@@ -251,13 +352,16 @@ def iterate_key(filepath, groups):
             key_infos = sorted(key_infos, key=lambda x: (x.timestamp, x.size), reverse=True)
             missed_groups = tuple(groups.difference([k.group_id for k in key_infos]))
 
-            #if all key_infos has the same timestamp and size and there is no missed groups - skip key, it is already up-to-date in all groups
-            if (key_infos[0].timestamp, key_infos[0].size) == (key_infos[-1].timestamp, key_infos[-1].size) and not missed_groups:
+            # if all key_infos has the same timestamp and size and there is no missed groups -
+            # skip key, it is already up-to-date in all groups
+            same_meta = lambda lhs, rhs: (lhs.timestamp, lhs.size) == (rhs.timestamp, rhs.size)
+            if same_meta(key_infos[0], key_infos[-1]) and not missed_groups:
                 continue
 
             yield (key, key_infos, missed_groups)
         else:
-            log.error("Invalid number of replicas for key: {0}: infos_count: {1}, groups_count: {2}".format(key, len(key_infos), len(groups)))
+            log.error("Invalid number of replicas for key: {0}: infos_count: {1}, groups_count: {2}"
+                      .format(key, len(key_infos), len(groups)))
 
 
 def recover(ctx):
@@ -351,9 +455,6 @@ if __name__ == '__main__':
     ctx = Ctx()
 
     log.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(
-        fmt='%(asctime)-15s %(processName)s %(levelname)s %(message)s',
-        datefmt='%d %b %y %H:%M:%S')
 
     ch = logging.StreamHandler(sys.stderr)
     ch.setFormatter(formatter)

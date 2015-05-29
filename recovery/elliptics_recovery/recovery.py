@@ -19,7 +19,7 @@ import logging
 import logging.handlers
 import traceback
 from multiprocessing import Pool
-#from memory_profiler import profile
+# from memory_profiler import profile
 
 from elliptics_recovery.route import RouteList
 from elliptics_recovery.etime import Time
@@ -28,11 +28,10 @@ from elliptics_recovery.monitor import Monitor, ALLOWED_STAT_FORMATS
 from elliptics_recovery.ctx import Ctx
 
 import elliptics
+from elliptics.log import formatter
 
 log = logging.getLogger()
 log.setLevel(logging.DEBUG)
-formatter = logging.Formatter(fmt='%(asctime)-15s %(processName)s %(levelname)s %(message)s',
-                              datefmt='%d %b %y %H:%M:%S')
 
 ch = logging.StreamHandler(sys.stderr)
 ch.setFormatter(formatter)
@@ -56,7 +55,26 @@ def cleanup(path):
                 os.unlink(file_name)
 
 
-#@profile
+def get_routes(ctx):
+    log.debug('Requesting routes')
+
+    log.debug("Creating logger")
+    elog = elliptics.Logger(ctx.log_file, int(ctx.log_level))
+
+    log.debug("Creating node")
+    node = elliptics_create_node(address=ctx.address,
+                                 elog=elog,
+                                 wait_timeout=ctx.wait_timeout,
+                                 remotes=ctx.remotes)
+
+    log.debug("Creating session for: {0}".format(ctx.address))
+    session = elliptics_create_session(node=node, group=0)
+
+    log.debug("Parsing routing table")
+    return RouteList.from_session(session)
+
+
+# @profile
 def main(options, args):
     if len(args) > 1:
         raise ValueError("Too many arguments passed: {0}, expected: 1".format(len(args)))
@@ -105,7 +123,16 @@ def main(options, args):
 
     try:
         ctx.log_file = os.path.join(ctx.tmp_dir, options.elliptics_log)
-        ctx.log_level = int(options.elliptics_log_level)
+        try:
+            ctx.log_level = int(options.elliptics_log_level)
+        except:
+            ctx.log_level = options.elliptics_log_level
+
+        if isinstance(ctx.log_level, int):
+            ctx.log_level = elliptics.log_level.values[ctx.log_level]
+        else:
+            ctx.log_level = elliptics.log_level.names[ctx.log_level]
+
         ctx.dump_keys = options.dump_keys
         if options.debug:
             ch.setLevel(logging.DEBUG)
@@ -240,6 +267,16 @@ def main(options, args):
                          .format(options.wait_timeout, repr(e), traceback.format_exc()))
 
     try:
+        ctx.prepare_timeout = Time.from_epoch(options.prepare_timeout)
+    except Exception as e:
+        try:
+            ctx.prepare_timeout = Time.from_string(options.prepare_timeout).time
+        except Exception as e:
+            raise ValueError("Can't parse prepare_timeout: '{0}': {1}, traceback: {2}"
+                             .format(options.wait_timeout, repr(e), traceback.format_exc()))
+    log.info("Using timeout: {0} for uncommitted records".format(ctx.prepare_timeout))
+
+    try:
         log.info("Starting cleanup...")
         cleanup(ctx.tmp_dir)
     except Exception as e:
@@ -252,22 +289,7 @@ def main(options, args):
 
     log.debug("Using following context:\n{0}".format(ctx))
 
-    log.debug("Setting up elliptics client")
-
-    log.debug("Creating logger")
-    elog = elliptics.Logger(ctx.log_file, int(ctx.log_level))
-
-    log.debug("Creating node")
-    node = elliptics_create_node(address=ctx.address,
-                                 elog=elog,
-                                 wait_timeout=ctx.wait_timeout,
-                                 remotes=ctx.remotes)
-
-    log.debug("Creating session for: {0}".format(ctx.address))
-    session = elliptics_create_session(node=node, group=0)
-
-    log.debug("Parsing routing table")
-    ctx.routes = RouteList.from_session(session)
+    ctx.routes = get_routes(ctx)
     log.debug("Parsed routing table:\n{0}".format(ctx.routes))
     if not ctx.routes:
         raise RuntimeError("No routes was parsed from session")
@@ -295,6 +317,7 @@ def main(options, args):
                 from elliptics_recovery.types.dc import main
                 result = main(ctx)
         ctx.pool.close()
+        ctx.pool.terminate()
         ctx.pool.join()
     except Exception as e:
         log.error("Recovering failed: %s, traceback: %s", repr(e), traceback.format_exc())
@@ -375,4 +398,7 @@ def run(args=None):
                       help="Recover data without meta. It is usefull only for services without data-rewriting because"
                       " with this option dnet_recovery will not check which replica of the key is newer"
                       " and will copy any replica of the key to missing groups.")
+    parser.add_option('-p', '--prepare-timeout', action='store', dest='prepare_timeout', default='1d',
+                      help='Timeout for uncommitted records (prepared, but not committed).'
+                      'Records that exceeded this timeout will be removed. [default: %default]')
     return main(*parser.parse_args(args))

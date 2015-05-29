@@ -624,11 +624,18 @@ class session
 		/*!
 		 * Changes node \a status on given \a address.
 		 */
-		void			update_status(const address &addr, dnet_node_status *status);
+		async_node_status_result	update_status(const address &addr, const dnet_node_status &status);
+
+		/*!
+		 * Request node \a status on given \a address.
+		 */
+		async_node_status_result	request_node_status(const address &addr);
 
 		async_backend_control_result enable_backend(const address &addr, uint32_t backend_id);
 		async_backend_control_result disable_backend(const address &addr, uint32_t backend_id);
 		async_backend_control_result start_defrag(const address &addr, uint32_t backend_id);
+		async_backend_control_result start_compact(const address &addr, uint32_t backend_id);
+		async_backend_control_result stop_defrag(const address &addr, uint32_t backend_id);
 		async_backend_control_result set_backend_ids(const address &addr, uint32_t backend_id, const std::vector<dnet_raw_id> &ids);
 		async_backend_control_result make_readonly(const address &addr, uint32_t backend_id);
 		async_backend_control_result make_writable(const address &addr, uint32_t backend_id);

@@ -641,7 +641,14 @@ static int dnet_cmd_backend_control_dangerous(struct dnet_net_state *st, struct 
 		break;
 	case DNET_BACKEND_START_DEFRAG:
 		if (cb.defrag_start) {
-			err = cb.defrag_start(cb.command_private);
+			err = cb.defrag_start(cb.command_private, static_cast<enum dnet_backend_defrag_level>(control->defrag_level));
+		} else {
+			err = -ENOTSUP;
+		}
+		break;
+	case DNET_BACKEND_STOP_DEFRAG:
+		if (cb.defrag_stop) {
+			err = cb.defrag_stop(cb.command_private);
 		} else {
 			err = -ENOTSUP;
 		}
@@ -730,11 +737,10 @@ int dnet_cmd_backend_status(struct dnet_net_state *st, struct dnet_cmd *cmd, voi
 	const auto &backends = node->config_data->backends->backends;
 	const size_t total_size = sizeof(dnet_backend_status_list) + backends.size() * sizeof(dnet_backend_status);
 
-	std::unique_ptr<dnet_backend_status_list, free_destroyer> list(reinterpret_cast<dnet_backend_status_list *>(malloc(total_size)));
+	std::unique_ptr<dnet_backend_status_list, free_destroyer> list(reinterpret_cast<dnet_backend_status_list *>(calloc(1, total_size)));
 	if (!list) {
 		return -ENOMEM;
 	}
-	memset(list.get(), 0, total_size);
 
 	list->backends_count = backends.size();
 

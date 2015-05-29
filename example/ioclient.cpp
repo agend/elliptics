@@ -64,7 +64,7 @@ static void dnet_usage(char *p)
 			" -N namespace         - use this namespace for operations\n"
 			" -D object            - read latest data for given object, if -I id is specified, this field is unused\n"
 			" -C flags             - command flags\n"
-			" -d request_string    - defragmentation request: 'start' - start defragmentation, 'status' - request current status\n"
+			" -d request_string    - defragmentation request: 'compact' - start defragmentation of heavily fragmented blobs (those where size of all removed records is more than defrag_percentage), 'start' - start whole defragmentation (means 'compact' and sorting of all unsorted blobs), 'status' - request current status, 'stop' - interrupt defragmentation of all blobs after completion of defragmentation of a single blob\n"
 			" -i flags             - IO flags (see DNET_IO_FLAGS_* in include/elliptics/packet.h\n"
 			" -H                   - do not hash id, use it as is\n"
 			" -b backend_id        - operate with given backend ID, it is needed for defragmentation request or backend status update\n"
@@ -319,6 +319,10 @@ int main(int argc, char *argv[])
 
 			if (defrag_status == "start") {
 				result = sess.start_defrag(ra, backend_id);
+			} else if (defrag_status == "compact") {
+				result = sess.start_compact(ra, backend_id);
+			} else if (defrag_status == "stop") {
+				result = sess.stop_defrag(ra, backend_id);
 			} else if ((defrag_status == "status") || (backend_status == "status")) {
 				result = sess.request_backends_status(ra);
 			} else if (backend_status == "enable") {
@@ -458,7 +462,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (update_status) {
-			s.update_status(address(remote_addr, port, family), &node_status);
+			sync_node_status_result result = s.update_status(address(remote_addr, port, family), node_status);
 		}
 
 	} catch (const std::exception &e) {

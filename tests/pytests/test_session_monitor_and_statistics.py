@@ -142,7 +142,6 @@ class MonitorStatsChecker:
             assert state_io['send_queue_size'] >= 0
             assert state_io['la'] >= 0
             assert state_io['free'] >= 0
-            assert state_io['weight'] >= 0
             assert state_io['stall'] >= 0
             assert state_io['join_state'] >= 0
 
@@ -346,7 +345,7 @@ def categories_combination():
     return list(set(combinations))
 
 
-class TestSession:
+class TestMonitor:
     def test_monitor_stat(self, server, simple_node):
         '''Simply get all statistics from all nodes and check that statistics is valid dict'''
         session = make_session(node=simple_node,

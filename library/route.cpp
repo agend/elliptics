@@ -310,11 +310,10 @@ int dnet_route_list::send_all_ids_nolock(dnet_net_state *st, dnet_id *id, uint64
 		total_size += it->ids.size() * sizeof(dnet_raw_id);
 	}
 
-	void *buffer = std::malloc(total_size);
+	void *buffer = std::calloc(1, total_size);
 	if (!buffer)
 		return -ENOMEM;
 	std::unique_ptr<void, free_destroyer> buffer_guard(buffer);
-	memset(buffer, 0, total_size);
 
 	dnet_cmd *cmd = reinterpret_cast<dnet_cmd *>(buffer);
 	cmd->id = *id;
@@ -394,20 +393,6 @@ dnet_route_list *dnet_route_list_create(dnet_node *node)
 void dnet_route_list_destroy(dnet_route_list *route)
 {
 	delete route;
-}
-
-template <typename Method, typename... Args>
-static int safe_call(dnet_route_list *route, Method method, Args &&...args)
-{
-	try {
-		if (route)
-			return (route->*method)(std::forward<Args>(args)...);
-		return 0;
-	} catch (std::bad_alloc &) {
-		return -ENOMEM;
-	} catch (...) {
-		return -EINVAL;
-	}
 }
 
 int dnet_route_list_reverse_lookup(dnet_net_state *st, dnet_cmd *cmd, void *data)

@@ -90,14 +90,12 @@ static int dnet_cmd_route_list(struct dnet_net_state *orig, struct dnet_cmd *cmd
 	}
 
 	total_size = sizeof(struct dnet_addr_cmd) + states_num * n->addr_num * sizeof(struct dnet_addr);
-	acmd = malloc(total_size);
+	acmd = calloc(1, total_size);
 
 	if (!acmd) {
 		pthread_mutex_unlock(&n->state_lock);
 		return -ENOMEM;
 	}
-
-	memset(acmd, 0, total_size);
 
 //	cmd = &acmd->cmd;
 	acmd->cnt.addr_num = states_num * n->addr_num;
@@ -286,11 +284,9 @@ int dnet_send_reply(void *state, struct dnet_cmd *cmd, const void *odata, unsign
 	void *data;
 	int err;
 
-	c = malloc(sizeof(struct dnet_cmd) + size);
+	c = calloc(1, sizeof(struct dnet_cmd) + size);
 	if (!c)
 		return -ENOMEM;
-
-	memset(c, 0, sizeof(struct dnet_cmd) + size);
 
 	data = c + 1;
 	*c = *cmd;
@@ -423,8 +419,8 @@ static int dnet_iterator_flow_control(struct dnet_iterator_common_private *ipriv
  * Also now it "prepares" data for next callback by combining data itself with
  * fixed-size response header.
  */
-static int dnet_iterator_callback_common(void *priv, struct dnet_raw_id *key,
-		void *data, uint64_t dsize, struct dnet_ext_list *elist)
+static int dnet_iterator_callback_common(void *priv, struct dnet_raw_id *key, uint64_t flags,
+                                         int fd, uint64_t data_offset, uint64_t dsize, struct dnet_ext_list *elist)
 {
 	struct dnet_iterator_common_private *ipriv = priv;
 	struct dnet_iterator_response *response;
@@ -436,7 +432,7 @@ static int dnet_iterator_callback_common(void *priv, struct dnet_raw_id *key,
 	uint64_t iterated_keys = 0;
 
 	/* Sanity */
-	if (ipriv == NULL || key == NULL || data == NULL || elist == NULL)
+	if (ipriv == NULL || key == NULL || fd < 0 || elist == NULL)
 		return -EINVAL;
 
 	iterated_keys = atomic_inc(&ipriv->iterated_keys);
@@ -452,7 +448,6 @@ static int dnet_iterator_callback_common(void *priv, struct dnet_raw_id *key,
 
 	/* Set data to NULL in case it's not requested */
 	if (!(ipriv->req->flags & DNET_IFLAGS_DATA)) {
-		data = NULL;
 		dsize = 0;
 	}
 	size = response_size + dsize;
@@ -475,13 +470,13 @@ static int dnet_iterator_callback_common(void *priv, struct dnet_raw_id *key,
 	response->size = fsize;
 	response->total_keys = ipriv->total_keys;
 	response->iterated_keys = iterated_keys;
+	response->flags = flags;
 	dnet_convert_iterator_response(response);
 
 	/* Data */
-	if (data) {
-		position += response_size;
-		memcpy(position, data, dsize);
-	}
+	err = dnet_read_ll(fd, (char *)position, dsize, data_offset);
+	if (err)
+		goto err_out_exit;
 
 	/* Finally run next callback */
 	err = ipriv->next_callback(ipriv->next_private, combined, size);
@@ -616,17 +611,29 @@ static int dnet_iterator_start(struct dnet_backend_io *backend, struct dnet_net_
 	};
 	struct dnet_iterator_send_private spriv;
 	struct dnet_iterator_file_private fpriv;
-	int err;
+	int err = 0;
+
+	/* Check that backend supports iterator */
+	if (!backend->cb->iterator) {
+		err = -ENOTSUP;
+		dnet_log(st->n, DNET_LOG_ERROR, "%s: iteration failed: backend doesn't support iteration",
+		         dnet_dump_id(&cmd->id));
+		goto err_out_exit;
+	}
 
 	/* Check flags */
 	if ((ireq->flags & ~DNET_IFLAGS_ALL) != 0) {
 		err = -ENOTSUP;
+		dnet_log(st->n, DNET_LOG_ERROR, "%s: iteration failed: unknown iteration flags: %" PRIu64,
+		         dnet_dump_id(&cmd->id), ireq->flags);
 		goto err_out_exit;
 	}
 
 	/* Check callback type */
 	if (ireq->itype <= DNET_ITYPE_FIRST || ireq->itype >= DNET_ITYPE_LAST) {
 		err = -ENOTSUP;
+		dnet_log(st->n, DNET_LOG_ERROR, "%s: iteration failed: unknown iteration type: %" PRIu32,
+		         dnet_dump_id(&cmd->id), ireq->itype);
 		goto err_out_exit;
 	}
 
@@ -658,9 +665,13 @@ static int dnet_iterator_start(struct dnet_backend_io *backend, struct dnet_net_
 		cpriv.next_private = &fpriv;
 		/* TODO: Implement local file-based iterators */
 		err = -ENOTSUP;
+		dnet_log(st->n, DNET_LOG_ERROR, "%s: iteration failed: type 'DNET_ITYPE_DISK' is not implemented",
+		         dnet_dump_id(&cmd->id));
 		goto err_out_exit;
 	default:
 		err = -EINVAL;
+		dnet_log(st->n, DNET_LOG_ERROR, "%s: iteration failed: unknown iteration type: %" PRIu32,
+		         dnet_dump_id(&cmd->id), ireq->itype);
 		goto err_out_exit;
 	}
 
@@ -678,7 +689,7 @@ static int dnet_iterator_start(struct dnet_backend_io *backend, struct dnet_net_
 	dnet_iterator_destroy(st->n, cpriv.it);
 
 err_out_exit:
-	dnet_log(st->n, DNET_LOG_NOTICE, "%s: %s: iteration finished: err: %d",
+	dnet_log(st->n, err ? DNET_LOG_ERROR : DNET_LOG_NOTICE, "%s: %s: iteration finished: err: %d",
 			__func__, dnet_dump_id(&cmd->id), err);
 	return err;
 }
@@ -1143,13 +1154,11 @@ int dnet_send_read_data(void *state, struct dnet_cmd *cmd, struct dnet_io_attr *
 
 	gettimeofday(&start_tv, NULL);
 
-	c = malloc(hsize);
+	c = calloc(1, hsize);
 	if (!c) {
 		err = -ENOMEM;
 		goto err_out_exit;
 	}
-
-	memset(c, 0, hsize);
 
 	rio = (struct dnet_io_attr *)(c + 1);
 
@@ -1436,7 +1445,6 @@ err_out_exit:
 int dnet_checksum_fd(struct dnet_node *n, int fd, uint64_t offset, uint64_t size, void *csum, int csize)
 {
 	int err;
-	struct dnet_map_fd m;
 
 	if (!size) {
 		struct stat st;
@@ -1451,16 +1459,7 @@ int dnet_checksum_fd(struct dnet_node *n, int fd, uint64_t offset, uint64_t size
 		size = st.st_size;
 	}
 
-	m.fd = fd;
-	m.size = size;
-	m.offset = offset;
-
-	err = dnet_data_map(&m);
-	if (err)
-		goto err_out_exit;
-
-	err = dnet_checksum_data(n, m.data, size, csum, csize);
-	dnet_data_unmap(&m);
+	err = dnet_transform_file(n, fd, offset, size, csum, csize);
 
 err_out_exit:
 	return err;

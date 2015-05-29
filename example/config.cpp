@@ -261,7 +261,7 @@ void parse_options(config_data *data, const config &options)
 
 	data->cfg_state.wait_timeout = options.at("wait_timeout", 0u);
 	data->cfg_state.check_timeout = options.at("check_timeout", 0l);
-	data->cfg_state.stall_count = options.at("stall_count", 0l);
+	data->cfg_state.stall_count = options.at("stall_count", DNET_DEFAULT_STALL_TRANSACTIONS);
 	data->cfg_state.flags |= (options.at("join", false) ? DNET_CFG_JOIN_NETWORK : 0);
 	data->cfg_state.flags |= (options.at("flags", 0) & ~DNET_CFG_JOIN_NETWORK);
 	data->cfg_state.io_thread_num = options.at<unsigned>("io_thread_num");
@@ -286,8 +286,12 @@ void parse_options(config_data *data, const config &options)
 	dnet_set_addr(data, options.at("address", std::vector<std::string>()));
 
 	const std::vector<std::string> remotes = options.at("remote", std::vector<std::string>());
-	for (auto it = remotes.begin(); it != remotes.end(); ++it) {
-		data->remotes.emplace_back(*it);
+	for (auto it = remotes.cbegin(); it != remotes.cend(); ++it) {
+		try {
+			data->remotes.emplace_back(*it);
+		} catch (const std::exception &e) {
+			dnet_backend_log(data->cfg_state.log, DNET_LOG_ERROR, "Failed to add address to remotes: %s", e.what());
+		}
 	}
 
 	if (options.has("monitor")) {

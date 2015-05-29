@@ -87,6 +87,10 @@ void dnet_set_need_exit(struct dnet_node *n);
  * freed when transaction is completed.
  */
 
+typedef int (* transaction_callback)(struct dnet_addr *addr,
+				    struct dnet_cmd *cmd,
+				    void *priv);
+
 struct dnet_io_control {
 	/* Used as cmd->id/group_id - 'address' of the remote node */
 	struct dnet_id			id;
@@ -105,9 +109,7 @@ struct dnet_io_control {
 	 *
 	 * All parameters are releated to the received transaction reply.
 	 */
-	int 				(* complete)(struct dnet_addr *addr,
-							struct dnet_cmd *cmd,
-							void *priv);
+	transaction_callback		complete;
 
 	/*
 	 * Transaction completion private data. Will be accessible in the
@@ -198,8 +200,8 @@ static inline const char *dnet_flags_dump_cfgflags(uint64_t flags)
 struct dnet_iterator_ctl {
 	void				*iterate_private;
 	void				*callback_private;
-	int				(* callback)(void *priv, struct dnet_raw_id *key,
-			void *data, uint64_t dsize, struct dnet_ext_list *elist);
+	int				(* callback)(void *priv, struct dnet_raw_id *key, uint64_t flags,
+			int fd, uint64_t data_offset, uint64_t dsize, struct dnet_ext_list *elist);
 };
 
 /*
@@ -244,7 +246,8 @@ struct dnet_backend_callbacks {
 			struct dnet_iterator_request *ireq, struct dnet_iterator_range *irange);
 
 	int			(* defrag_status)(void *priv);
-	int			(* defrag_start)(void *priv);
+	int			(* defrag_start)(void *priv, enum dnet_backend_defrag_level level);
+	int			(* defrag_stop)(void *priv);
 
 	/*
 	 * Returns dir used by backend
@@ -658,9 +661,7 @@ static inline int dnet_id_cmp(const struct dnet_id *id1, const struct dnet_id *i
  * @complete will be invoked each time object with given @id is modified.
  */
 int dnet_request_notification(struct dnet_session *s, struct dnet_id *id,
-	int (* complete)(struct dnet_addr *state,
-			struct dnet_cmd *cmd,
-			void *priv),
+	transaction_callback complete,
 	void *priv);
 
 /*
@@ -697,9 +698,6 @@ int dnet_request_cmd(struct dnet_session *s, struct dnet_trans_control *ctl);
 
 int dnet_fill_addr(struct dnet_addr *addr, const char *saddr, const int port, const int sock_type, const int proto);
 
-/* Change node status on given address or ID */
-int dnet_update_status(struct dnet_session *s, const struct dnet_addr *addr, struct dnet_id *id, struct dnet_node_status *status);
-
 /*
  * Transformation helper, which uses *ppos as an index for transformation function.
  * @src and @size correspond to to be transformed source data.
@@ -709,6 +707,7 @@ int dnet_transform(struct dnet_session *s, const void *src, uint64_t size, struc
 int __attribute__((weak)) dnet_transform_node(struct dnet_node *n, const void *src, uint64_t size,
 		unsigned char *csum, int csize);
 int dnet_transform_raw(struct dnet_session *s, const void *src, uint64_t size, char *csum, unsigned int csize);
+int dnet_transform_file(struct dnet_node *n, int fd, uint64_t offset, uint64_t size, char *csum, unsigned int csize);
 
 /*
  * Transformation implementation, currently it's sha512 hash.

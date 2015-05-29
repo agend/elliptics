@@ -170,13 +170,11 @@ int dnet_work_pool_alloc(struct dnet_work_pool_place *place, struct dnet_node *n
 
 	pthread_mutex_lock(&place->lock);
 
-	place->pool = malloc(sizeof(struct dnet_work_pool));
+	place->pool = calloc(1, sizeof(struct dnet_work_pool));
 	if (!place->pool) {
 		err = -ENOMEM;
 		goto err_out_exit;
 	}
-
-	memset(place->pool, 0, sizeof(struct dnet_work_pool));
 
 	err = pthread_mutex_init(&place->pool->lock, NULL);
 	if (err) {
@@ -828,11 +826,13 @@ static void *dnet_io_process_network(void *data_)
 	struct dnet_node *n = nio->n;
 	struct dnet_net_epoll_data *data;
 	struct dnet_net_state *st;
-	struct epoll_event *evs = malloc(sizeof(struct epoll_event));
+	int evs_size = 100;
+	struct epoll_event *evs = malloc(evs_size * sizeof(struct epoll_event));
 	struct epoll_event *evs_tmp = NULL;
-	int evs_size = 1;
+	struct timespec ts;
 	int tmp = 0;
 	int err = 0;
+	int num_events = 0;
 	int i = 0;
 	struct timeval prev_tv, curr_tv;
 
@@ -849,10 +849,9 @@ static void *dnet_io_process_network(void *data_)
 	gettimeofday(&prev_tv, NULL);
 
 	while (!n->need_exit) {
-		// get current number of states
-		tmp = dnet_node_state_num(n);
-		if (evs_size < tmp) {
-			tmp *= 2; // tries to increase number of epoll_events
+		// check if epoll possibly has more events to process then evs_size
+		if (num_events >= evs_size) {
+			tmp = 2 * evs_size; // tries to increase number of epoll_events
 			evs_tmp = (struct epoll_event *)realloc(evs, sizeof(struct epoll_event) * tmp);
 			if (evs_tmp) {
 				evs = evs_tmp;
@@ -870,16 +869,17 @@ static void *dnet_io_process_network(void *data_)
 			if (err == -EAGAIN || err == -EINTR)
 				continue;
 
-			dnet_log_err(n, "Failed to wait for IO fds");
+			dnet_log(n, DNET_LOG_ERROR, "Failed to wait for IO fds: %s [%d]", strerror(-err), err);
 			n->need_exit = err;
 			break;
 		}
 
 		// tmp will counts number of send events
 		tmp = 0;
-		// suffles available epoll_events
-		dnet_shuffle_epoll_events(evs, err);
-		for (i = 0; i < err; ++i) {
+		num_events = err;
+		// shuffles available epoll_events
+		dnet_shuffle_epoll_events(evs, num_events);
+		for (i = 0; i < num_events; ++i) {
 			data = evs[i].data.ptr;
 			st = data->st;
 			st->epoll_fd = nio->epoll_fd;
@@ -899,13 +899,7 @@ static void *dnet_io_process_network(void *data_)
 			if (err == 0)
 				continue;
 
-			if (err == -EAGAIN && st->stall < DNET_DEFAULT_STALL_TRANSACTIONS)
-				continue;
-
-			if (err < 0 || st->stall >= DNET_DEFAULT_STALL_TRANSACTIONS) {
-				if (!err)
-					err = -ETIMEDOUT;
-
+			if ((err < 0 && err != -EAGAIN) || st->stall >= n->stall_count) {
 				char addr_str[128] = "no address";
 				if (n->addr_num) {
 					dnet_addr_string_raw(&n->addrs[0], addr_str, sizeof(addr_str));
@@ -929,7 +923,7 @@ static void *dnet_io_process_network(void *data_)
 				// transactions may live in the tree and be accessed without locks in IO thread,
 				// IO thread is kind of 'owner' of the transaction processing
 				dnet_state_put(st);
-				continue;
+				break;
 			}
 		}
 
@@ -944,7 +938,13 @@ static void *dnet_io_process_network(void *data_)
 			// wait condition variable - io queues has a free slot or some socket has something to send
 			pthread_mutex_lock(&n->io->full_lock);
 			n->io->blocked = 1;
-			pthread_cond_wait(&n->io->full_wait, &n->io->full_lock);
+			while (!n->need_exit) {
+				gettimeofday(&curr_tv, NULL);
+				ts.tv_sec = curr_tv.tv_sec + 1;
+				ts.tv_nsec = curr_tv.tv_usec * 1000;
+				if (pthread_cond_timedwait(&n->io->full_wait, &n->io->full_lock, &ts) == 0)
+					break;
+			}
 			n->io->blocked = 0;
 			pthread_mutex_unlock(&n->io->full_lock);
 		}

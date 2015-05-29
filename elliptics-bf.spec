@@ -3,7 +3,7 @@
 
 Summary:	Distributed hash table storage
 Name:		elliptics
-Version:	2.26.4.1
+Version:	2.26.5.2
 Release:	1.oid_mod%{?dist}
 
 License:	GPLv2+
@@ -15,7 +15,7 @@ BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires:	python-devel
 BuildRequires:	libcocaine-core2-devel >= 0.11.2.0
 BuildRequires:  cocaine-framework-native-devel >= 0.11.0.0
-BuildRequires:	eblob-devel >= 0.22.15
+BuildRequires:	eblob-devel >= 0.22.22
 BuildRequires:  libblackhole-devel >= 0.2.3-1
 BuildRequires:	libev-devel libtool-ltdl-devel
 BuildRequires:	cmake msgpack-devel python-msgpack
@@ -143,6 +143,56 @@ rm -rf %{buildroot}
 
 
 %changelog
+* Wed May 06 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.5.2
+- package: depend on 0.22.22+ eblob which brings defrag stop command
+- network: fixed bug with when total_count < failed_count in dnet_socket_connect_new_sockets()
+- dnet_client, ioclient: added stop_defrag command
+
+* Tue Apr 28 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.5.1
+- network: fixed bug with negative route_list_count
+
+* Mon Apr 27 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.5.0
+- network: don't use dnet_node_state_num() to estimate number of ready events in epol
+- pytests: added tests that checks new flag elliptics.record_flags.uncommitted:
+-      * serial of write_prepare, write_plain and write_commit with checking data accessibility
+-      * new tests of merge and dc recovery with mixing uncommitted keys into recovering keys.
+- core: added common for all backends flag DNET_RECORD_FLAGS_UNCOMMITTED which is set for record is uncommitted and can't be read
+- iterator: made iterator collects uncommitted records
+- recovery: added handling uncommitted records, added options prepare-timeout which specifies timeout for uncommitted records after which such records should be deleted
+- recovery: fixed hanging on pool.close() - there is a bug in multiprocessing
+- package: depend on 0.22.21+ eblob, it contains defrag adn prepare/commit changes needed by elliptics
+- ioclient: added more description of defrag modes
+- network: refactored dnet_addr_socket & dnet_connect_state related resource handling logic
+- logs: added error logs at places where iterator can fail
+- ioclient: added description of 'compact' defragmentation mode
+- core: used timedwait for waiting condition variable - fixed hanging on exit
+- iterator: added checking that the backend supports iterator before run iterator
+- python: allow to use all basestrings for elliptics.Id initialization not only str
+- network: dnet_addr_socket is class now, thus handling its resources. sockets container is std::map instead of c-style intrusive list (of sockets)
+- session, backend: added new defragmentation level & command 'compact' - datasort heavy-fragmented blobs only
+- network: use stall_count from node instead of hard-coded constant
+- network: fixed possible deadlock and double resource release in dnet_check_all_states()
+- network: send ping command to remote node if transactions stall count reaches its limit instead of resetting net_state
+- recovery: fixed typo and merged disabling checksums for all but the first chunk
+- recovery: use close to elliptics' log format in recovery logs
+- recovery: fixed  statistics calculation
+- build: fixed build on rhel 6 with boost v1.41.0-25
+
+* Fri Mar 27 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.4.4
+- config: fixed bug when invalid remote (e.g. whose net address couldn't be resolved) from config leads to dnet_ioserv termination during initialization step
+- pool: fixed crash on working with invalid evs[i].data.ptr (dnet_net_state) after releasing of this net_state on EPOLLERR at previous iteration over evs[i]
+
+* Fri Mar 27 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.4.3
+- package: depend on 0.22.20+ eblob because of API changes
+
+* Fri Mar 27 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.4.2
+- network io handler iterates only single event, where epoll_wait() may return more than one
+- added top events settings to monitoring/top provider
+- net stats in procfs provider: rx/tx bytes, packets, error count for net interfaces
+- removed unused sha384 functions and unification with eblob cryptolib
+- mmap elimination - mmap() replaced with pread(). Corrupted filesystem may return -EIO for some reads, while
+- 	trying to access that data via mmap ends up with SIGBUS signal, which kills whole eblob user.
+
 * Mon Mar 23 2015 Evgeniy Polyakov <zbr@ioremap.net> - 2.26.4.1
 - json: fixed crash on generating statistics for disabled at startup backends
 - Used local node address for state in local_session: fixed invalid address at logs.
