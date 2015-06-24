@@ -454,11 +454,11 @@ if __name__ == '__main__':
     (options, args) = parser.parse_args()
     ctx = Ctx()
 
-    log.setLevel(logging.DEBUG)
+    log.setLevel(logging.ERROR)
 
     ch = logging.StreamHandler(sys.stderr)
     ch.setFormatter(formatter)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(logging.ERROR)
     log.addHandler(ch)
 
     if not os.path.exists(ctx.tmp_dir):
@@ -484,7 +484,7 @@ if __name__ == '__main__':
         # elliptics library and python app, esp. in presence of auto-rotation
         fh = logging.FileHandler(ctx.log_file)
         fh.setFormatter(formatter)
-        fh.setLevel(logging.DEBUG)
+        fh.setLevel(logging.ERROR)
         log.addHandler(fh)
     except Exception as e:
         raise ValueError("Can't parse log_level: '{0}': {1}, traceback: {2}"

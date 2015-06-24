@@ -31,11 +31,11 @@ import elliptics
 from elliptics.log import formatter
 
 log = logging.getLogger()
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.ERROR)
 
 ch = logging.StreamHandler(sys.stderr)
 ch.setFormatter(formatter)
-ch.setLevel(logging.INFO)
+ch.setLevel(logging.ERROR)
 log.addHandler(ch)
 
 TYPE_MERGE = 'merge'
@@ -141,7 +141,7 @@ def main(options, args):
         # elliptics library and python app, esp. in presence of auto-rotation
         fh = logging.FileHandler(ctx.log_file)
         fh.setFormatter(formatter)
-        fh.setLevel(logging.INFO)
+        fh.setLevel(logging.ERROR)
         if options.debug:
             fh.setLevel(logging.DEBUG)
         log.addHandler(fh)
