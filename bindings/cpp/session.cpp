@@ -2714,7 +2714,7 @@ async_remove_result session::bulk_read_by_original_id(const std::vector<uint64_t
 		ios.push_back(io);
 	}
 
-	return bulk_read(ios)
+	return bulk_read(ios);
 }
 
 } } // namespace ioremap::elliptics
