@@ -2696,20 +2696,20 @@ async_remove_result session::remove_by_original_id(const uint64_t &original_id)
 	return remove(id);
 }
 
-async_remove_result session::bulk_read_by_original_id(const std::vector<uint64_t> &keys, uint64_t size)
+async_remove_result session::bulk_read_by_original_id(const std::vector<uint64_t> &ids, uint64_t size)
 {
 	std::vector<dnet_io_attr> ios;
 	dnet_io_attr io;
 	io.size = size;
 	memset(&io, 0, sizeof(io));
 	io.flags = get_ioflags();
-	ios.reserve(keys.size());
+	ios.reserve(ids.size());
 
-	for (size_t i = 0; i < keys.size(); ++i)
+	for (size_t i = 0; i < ids.size(); ++i)
 	{
 
 		dnet_id id;
-		transform(id, keys[i]);
+		transform(id, ids[i]);
 		memcpy(io.id, id.id, sizeof(io.id));
 		ios.push_back(io);
 	}
