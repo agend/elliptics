@@ -943,7 +943,7 @@ class session
 		 *
 		 * Returns async_remove_result.
 		 */
-		async_remove_result bulk_read_by_original_id(const std::vector<uint64_t> &ids, uint64_t size);
+		async_read_result bulk_read_by_original_id(const std::vector<uint64_t> &ids, uint64_t size);
 		
 	protected:
 		std::shared_ptr<session_data>		m_data;
