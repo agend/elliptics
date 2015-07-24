@@ -41,7 +41,7 @@ centos7:
   - eblob_ver=`grep "BuildRequires:.*blob-devel" elliptics-bf.spec | awk -F '>= '
     '{print $2}'`
   - scp distro@gitlab.loc:~/elliptics/deps/el7/* deps/
-  - scp distro@gitlab.loc:~/elliptics/el7/eblob* deps/
+  - scp distro@gitlab.loc:~/elliptics/el7/eblob*${eblob_ver}* deps/
   - yum localinstall -y deps/*el7*.rpm
   - cur_dir_name=${PWD##*/}
   - mkdir -p ./rpmbuild/{SOURCES,BUILD,RPMS,SPECS,SRPMS}
