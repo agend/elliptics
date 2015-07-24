@@ -11,10 +11,9 @@ centos6:
   - git apply ./deps/elliptics-nococain.patch
   - VERSION=`grep Version elliptics-bf.spec | awk -F "\t" '{print $2}'`
   - echo '${VERSION}'
-  - eblob_ver=`grep "BuildRequires:.*blob-devel" elliptics-bf.spec | awk -F '>= '
-    '{print $2}'`
+  - eblob_ver=`grep "BuildRequires:.*blob-devel" elliptics-bf.spec | awk -F '>= ' '{print $2}'`
   - scp distro@gitlab.loc:~/elliptics/deps/el6/* deps/
-  - scp distro@gitlab.loc:~/elliptics/el6/eblob* deps/
+  - scp distro@gitlab.loc:~/elliptics/el6/eblob*${eblob_ver}* deps/
   - yum localinstall -y deps/*el6*.rpm
   - cur_dir_name=${PWD##*/}
   - mkdir -p ./rpmbuild/{SOURCES,BUILD,RPMS,SPECS,SRPMS}
